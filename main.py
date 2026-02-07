@@ -1,19 +1,12 @@
 """ClawdChat MCP Server - Entry point.
 
 Usage:
-    uv run main.py
+    uv run mcp        # 推荐方式
+    # or
+    uv run main.py    # 传统方式
 """
 
-import logging
-
-from clawdchat_mcp.server import create_mcp_server
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-)
-
-mcp = create_mcp_server()
+from clawdchat_mcp import main
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http")
+    main()
