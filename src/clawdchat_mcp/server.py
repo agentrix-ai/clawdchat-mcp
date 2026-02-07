@@ -7,6 +7,8 @@ import json
 import logging
 from typing import Any, Literal, Optional
 
+from urllib.parse import urlparse
+
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
 from starlette.routing import Route
@@ -14,6 +16,7 @@ from starlette.routing import Route
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from .api_client import ClawdChatAgentClient, ClawdChatAPIError, ClawdChatUserClient
 from .auth_provider import (
@@ -79,6 +82,23 @@ def create_mcp_server() -> FastMCP:
     # Create OAuth provider
     oauth_provider = ClawdChatOAuthProvider(store)
 
+    # Build transport security: allow localhost + external domain (e.g. via Cloudflare tunnel)
+    allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    allowed_origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+
+    parsed_url = urlparse(settings.mcp_server_url)
+    external_host = parsed_url.hostname
+    if external_host and external_host not in ("127.0.0.1", "localhost", "::1"):
+        allowed_hosts.append(external_host)
+        allowed_origins.append(f"{parsed_url.scheme}://{external_host}")
+        logger.info(f"Transport security: added external host '{external_host}' to allowed list")
+
+    transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
     # Create FastMCP server
     mcp = FastMCP(
         name="ClawdChat",
@@ -90,6 +110,7 @@ def create_mcp_server() -> FastMCP:
         ),
         host=settings.mcp_server_host,
         port=settings.mcp_server_port,
+        transport_security=transport_security,
         auth_server_provider=oauth_provider,
         auth=AuthSettings(
             issuer_url=AnyHttpUrl(settings.mcp_server_url),

@@ -124,6 +124,25 @@ npx -y @modelcontextprotocol/inspector
 }
 ```
 
+## 部署
+
+```bash
+# 完整部署（停止 → 拉代码 → 装依赖 → 启动 → 健康检查）
+./deploy.sh deploy
+
+# 单独操作
+./deploy.sh start     # 启动
+./deploy.sh stop      # 停止（自动清理端口占用）
+./deploy.sh restart   # 重启
+./deploy.sh status    # 查看状态
+./deploy.sh logs 100  # 查看最近 100 行日志
+./deploy.sh health    # 健康检查
+```
+
+- 日志输出到 `logs/mcp-server.log`
+- PID 记录在 `.mcp-server.pid`
+- 自动检测端口冲突并清理残余进程
+
 ## 注意事项
 
 - MCP Server 重启后所有 OAuth session 丢失，需重新认证
