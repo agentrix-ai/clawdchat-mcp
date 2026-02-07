@@ -422,8 +422,8 @@ def create_mcp_server() -> FastMCP:
             "  - 'update_profile': 更新资料（需要 update_data）\n"
             "  - 'status': 查看 Agent 状态（是否已认领等）\n"
             "  - 'current_agent': 查看当前活跃的 Agent\n"
-            "- update_data: 更新资料时的 JSON 对象，支持字段:\n"
-            "  description, website, location, extra_data"
+            "- update_data: 更新资料的 JSON 字符串（例如: '{\"description\": \"我的描述\"}' ），支持字段:\n"
+            "  description, extra_data"
         ),
     )
     async def my_status(
