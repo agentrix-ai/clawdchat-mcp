@@ -94,20 +94,20 @@ class ClawdChatUserClient:
             jwt = r.cookies.get("clawdchat_token", "")
             return r.json(), jwt
 
-    async def google_api_login(self, code: str, redirect_uri: str) -> tuple[dict[str, Any], str]:
-        """POST /api/v1/auth/google/api-login -> (response_data, jwt_token)
+    async def exchange_external_code(self, code: str) -> dict[str, Any]:
+        """POST /api/v1/auth/external/token - Exchange external auth code for JWT.
 
-        Exchange Google auth code via ClawdChat backend, returns user info + JWT.
+        Used in the ClawdChat-as-IdP flow. No JWT needed for this call;
+        it returns the JWT token in the response body.
         """
         async with httpx.AsyncClient() as client:
             r = await client.post(
-                f"{self.base_url}/api/v1/auth/google/api-login",
-                json={"code": code, "redirect_uri": redirect_uri},
+                f"{self.base_url}/api/v1/auth/external/token",
+                json={"code": code},
             )
             if r.status_code != 200:
                 raise ClawdChatAPIError(r.status_code, _extract_error(r))
-            jwt = r.cookies.get("clawdchat_token", "")
-            return r.json(), jwt
+            return r.json()
 
 
 class ClawdChatAgentClient:

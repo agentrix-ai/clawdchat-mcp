@@ -2,9 +2,13 @@
 
 Implements MCP's OAuthAuthorizationServerProvider interface.
 Handles the OAuth 2.1 flow with PKCE, delegating user authentication
-to the ClawdChat backend API.
+to the ClawdChat backend via its external auth (IdP) endpoint.
+
+Authentication flow:
+  MCP Client -> MCP Server -> ClawdChat (Google/Phone) -> MCP Server -> MCP Client
 """
 
+import json as _json
 import logging
 import time
 from pathlib import Path
@@ -13,15 +17,13 @@ from urllib.parse import urlencode
 from jinja2 import Environment, FileSystemLoader
 from pydantic import AnyUrl
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
     AuthorizationParams,
-    AuthorizeError,
     OAuthAuthorizationServerProvider,
-    OAuthToken,
     RefreshToken,
     RegistrationError,
     TokenError,
@@ -118,7 +120,7 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
             resource=params.resource,
         ))
 
-        # Redirect to our login page
+        # Redirect to our login page (which then redirects to ClawdChat)
         return f"{settings.mcp_server_url}/auth/login?state={state}"
 
     async def load_authorization_code(
@@ -278,59 +280,62 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
 # ---- HTTP handlers for login/agent-selection pages ----
 
 
-async def login_page_handler(request: Request) -> HTMLResponse:
-    """GET /auth/login - Show login page."""
+async def login_page_handler(request: Request) -> Response:
+    """GET /auth/login - Redirect to ClawdChat for authentication.
+
+    Builds the ClawdChat external auth URL and redirects the user there.
+    ClawdChat handles all login methods (Google, Phone, etc.) and redirects
+    back to /auth/clawdchat/callback with a one-time code.
+    """
     state = request.query_params.get("state", "")
     if not state or not store.get_pending_login(state):
         return HTMLResponse("<h1>Invalid or expired login session</h1>", status_code=400)
 
-    # Build Google auth URL if configured
-    google_auth_url = ""
-    if settings.google_enabled:
-        google_auth_url = build_google_auth_url(state)
+    # Build ClawdChat external auth URL
+    callback_url = f"{settings.mcp_server_url}/auth/clawdchat/callback"
+    params = urlencode({
+        "callback_url": callback_url,
+        "state": state,
+    })
+    clawdchat_auth_url = f"{settings.clawdchat_api_url}/api/v1/auth/external/authorize?{params}"
 
-    template = jinja_env.get_template("login.html")
-    html = template.render(
-        state=state,
-        google_enabled=settings.google_enabled,
-        google_auth_url=google_auth_url,
-    )
-    return HTMLResponse(html)
+    return RedirectResponse(url=clawdchat_auth_url, status_code=302)
 
 
-async def login_callback_handler(request: Request) -> JSONResponse:
-    """POST /auth/login/callback - Handle phone login."""
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Invalid request body"}, status_code=400)
+async def clawdchat_callback_handler(request: Request) -> Response:
+    """GET /auth/clawdchat/callback - Handle callback from ClawdChat authentication.
 
-    phone = body.get("phone", "").strip()
-    state = body.get("state", "")
+    ClawdChat redirects here after successful user authentication with a one-time code.
+    We exchange it for JWT, fetch agents, and continue the MCP OAuth flow.
+    """
+    code = request.query_params.get("code")
+    state = request.query_params.get("state", "")
 
-    if not phone or not state:
-        return JSONResponse({"error": "缺少手机号或 state"}, status_code=400)
+    if not code or not state:
+        return HTMLResponse("<h1>缺少必要参数</h1>", status_code=400)
 
     pending = store.get_pending_login(state)
     if not pending:
-        return JSONResponse({"error": "登录会话已过期，请重新开始"}, status_code=400)
+        return HTMLResponse("<h1>登录会话已过期，请重新开始</h1>", status_code=400)
 
-    # Authenticate via ClawdChat API
+    # Exchange code for JWT via ClawdChat external token endpoint
     try:
         user_client = ClawdChatUserClient(settings.clawdchat_api_url, "")
-        login_result, jwt_token = await user_client.phone_login(phone)
+        result = await user_client.exchange_external_code(code)
+        jwt_token = result.get("jwt", "")
     except ClawdChatAPIError as e:
-        return JSONResponse({"error": f"登录失败: {e.detail}"}, status_code=400)
+        logger.error(f"ClawdChat auth callback failed: {e}")
+        return HTMLResponse(f"<h1>认证失败</h1><p>{e.detail}</p>", status_code=400)
     except Exception as e:
-        logger.exception("Login error")
-        return JSONResponse({"error": f"登录失败: {str(e)}"}, status_code=500)
+        logger.exception("ClawdChat auth callback error")
+        return HTMLResponse(f"<h1>认证失败</h1><p>{str(e)}</p>", status_code=500)
 
     if not jwt_token:
-        return JSONResponse({"error": "登录失败: 未获取到认证令牌"}, status_code=400)
+        return HTMLResponse("<h1>认证失败</h1><p>未获取到认证令牌</p>", status_code=400)
 
-    # Update pending login with user JWT
+    # Update pending login with JWT
     pending.user_jwt = jwt_token
-    pending.user_info = login_result.get("user")
+    pending.user_info = result.get("user")
 
     # Fetch user's agents
     try:
@@ -338,20 +343,40 @@ async def login_callback_handler(request: Request) -> JSONResponse:
         agents_result = await user_client.get_my_agents()
         agents = agents_result.get("agents", [])
     except ClawdChatAPIError as e:
-        return JSONResponse({"error": f"获取 Agent 列表失败: {e.detail}"}, status_code=400)
+        return HTMLResponse(f"<h1>获取 Agent 列表失败</h1><p>{e.detail}</p>", status_code=400)
 
     if not agents:
-        return JSONResponse({
-            "error": "你还没有认领任何 Agent，请先在 ClawdChat 认领一个 Agent"
-        }, status_code=400)
+        return HTMLResponse(
+            "<h1>你还没有认领任何 Agent</h1><p>请先在 ClawdChat 认领一个 Agent</p>",
+            status_code=400,
+        )
 
     if len(agents) == 1:
         # Auto-select the only agent
         agent = agents[0]
-        return await _complete_authorization(state, pending, agent["id"], agent["name"])
+        auth_result = await _complete_authorization(state, pending, agent["id"], agent["name"])
+        result_data = _json.loads(auth_result.body.decode())
+        if result_data.get("redirect"):
+            return HTMLResponse(
+                f'<html><head><meta http-equiv="refresh" content="0;url={result_data["redirect"]}" />'
+                f'</head><body>正在跳转...</body></html>'
+            )
+        elif result_data.get("needs_reset"):
+            return RedirectResponse(
+                url=f"{settings.mcp_server_url}/auth/select-agent?state={state}",
+                status_code=302,
+            )
+        else:
+            return HTMLResponse(
+                f"<h1>错误</h1><p>{result_data.get('error', '未知错误')}</p>",
+                status_code=400,
+            )
 
-    # Multiple agents -> redirect to selection page
-    return JSONResponse({"redirect": f"/auth/select-agent?state={state}"})
+    # Multiple agents -> redirect to select-agent page
+    return RedirectResponse(
+        url=f"{settings.mcp_server_url}/auth/select-agent?state={state}",
+        status_code=302,
+    )
 
 
 async def select_agent_page_handler(request: Request) -> HTMLResponse:
@@ -457,137 +482,3 @@ async def _complete_authorization(
     logger.info(f"Authorization complete for agent '{agent_name}', redirecting to client")
 
     return JSONResponse({"redirect": redirect_uri})
-
-
-# ---- Google OAuth handlers ----
-
-GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-
-
-def build_google_auth_url(mcp_oauth_state: str) -> str:
-    """Build Google OAuth authorization URL.
-
-    Uses the same Google OAuth App as ClawdChat (shared client_id).
-    The MCP server's redirect_uri must be registered in Google Console.
-    """
-    params = {
-        "client_id": settings.google_client_id,
-        "redirect_uri": settings.google_redirect_uri,
-        "response_type": "code",
-        "scope": "email profile",
-        "access_type": "offline",
-        "state": mcp_oauth_state,  # pass through MCP internal state
-        "prompt": "consent",
-    }
-    return f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
-
-
-async def google_callback_handler(request: Request) -> HTMLResponse:
-    """GET /auth/google/callback - Handle Google OAuth callback.
-
-    Google redirects here after user authorizes. We then:
-    1. Exchange code via ClawdChat's /api/v1/auth/google/api-login
-    2. Get JWT token for this user
-    3. Continue MCP OAuth flow (fetch agents, select agent, etc.)
-    """
-    code = request.query_params.get("code")
-    state = request.query_params.get("state", "")
-    error = request.query_params.get("error")
-
-    if error:
-        return HTMLResponse(
-            f"<h1>Google 登录失败</h1><p>{error}</p>",
-            status_code=400,
-        )
-
-    if not code or not state:
-        return HTMLResponse(
-            "<h1>缺少必要参数</h1>",
-            status_code=400,
-        )
-
-    pending = store.get_pending_login(state)
-    if not pending:
-        return HTMLResponse(
-            "<h1>登录会话已过期，请重新开始</h1>",
-            status_code=400,
-        )
-
-    # Exchange code via ClawdChat backend
-    try:
-        user_client = ClawdChatUserClient(settings.clawdchat_api_url, "")
-        login_result, jwt_token = await user_client.google_api_login(
-            code=code,
-            redirect_uri=settings.google_redirect_uri,
-        )
-    except ClawdChatAPIError as e:
-        logger.error(f"Google login via ClawdChat failed: {e}")
-        return HTMLResponse(
-            f"<h1>Google 登录失败</h1><p>{e.detail}</p>",
-            status_code=400,
-        )
-    except Exception as e:
-        logger.exception("Google login error")
-        return HTMLResponse(
-            f"<h1>Google 登录失败</h1><p>{str(e)}</p>",
-            status_code=500,
-        )
-
-    if not jwt_token:
-        return HTMLResponse(
-            "<h1>Google 登录失败</h1><p>未获取到认证令牌</p>",
-            status_code=400,
-        )
-
-    # Update pending login with JWT
-    pending.user_jwt = jwt_token
-    pending.user_info = login_result.get("user")
-
-    # Fetch user's agents
-    try:
-        user_client = ClawdChatUserClient(settings.clawdchat_api_url, jwt_token)
-        agents_result = await user_client.get_my_agents()
-        agents = agents_result.get("agents", [])
-    except ClawdChatAPIError as e:
-        return HTMLResponse(
-            f"<h1>获取 Agent 列表失败</h1><p>{e.detail}</p>",
-            status_code=400,
-        )
-
-    if not agents:
-        return HTMLResponse(
-            "<h1>你还没有认领任何 Agent</h1>"
-            "<p>请先在 ClawdChat 认领一个 Agent</p>",
-            status_code=400,
-        )
-
-    if len(agents) == 1:
-        # Auto-select the only agent
-        agent = agents[0]
-        result = await _complete_authorization(state, pending, agent["id"], agent["name"])
-        # _complete_authorization returns JSONResponse; for browser redirect we need to extract
-        data = result.body.decode()
-        import json as _json
-        result_data = _json.loads(data)
-        if result_data.get("redirect"):
-            return HTMLResponse(
-                f'<html><head><meta http-equiv="refresh" content="0;url={result_data["redirect"]}" />'
-                f'</head><body>正在跳转...</body></html>'
-            )
-        elif result_data.get("needs_reset"):
-            # Redirect to select-agent page for confirmation
-            return RedirectResponse(
-                url=f"{settings.mcp_server_url}/auth/select-agent?state={state}",
-                status_code=302,
-            )
-        else:
-            return HTMLResponse(
-                f"<h1>错误</h1><p>{result_data.get('error', '未知错误')}</p>",
-                status_code=400,
-            )
-
-    # Multiple agents -> redirect to select-agent page
-    return RedirectResponse(
-        url=f"{settings.mcp_server_url}/auth/select-agent?state={state}",
-        status_code=302,
-    )

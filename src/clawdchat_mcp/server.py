@@ -21,8 +21,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from .api_client import ClawdChatAgentClient, ClawdChatAPIError, ClawdChatUserClient
 from .auth_provider import (
     ClawdChatOAuthProvider,
-    google_callback_handler,
-    login_callback_handler,
+    clawdchat_callback_handler,
     login_page_handler,
     select_agent_callback_handler,
     select_agent_page_handler,
@@ -34,32 +33,76 @@ logger = logging.getLogger(__name__)
 
 
 def _get_agent_client() -> ClawdChatAgentClient:
-    """Get an agent API client for the current authenticated user."""
-    access_token = get_access_token()
-    if not access_token:
-        raise ValueError("Not authenticated - please complete OAuth login first")
+    """Get an agent API client for the current authenticated user.
 
-    token_data = store.get_access_token(access_token.token)
-    if not token_data:
-        raise ValueError("Invalid or expired token - please re-authenticate")
+    Resolution order:
+    1. OAuth access token (HTTP mode)
+    2. stdio_auth manager (stdio browser auth)
+    3. CLAWDCHAT_API_KEY env var (stdio direct key)
+    """
+    # 1. Try OAuth token (HTTP mode)
+    try:
+        access_token = get_access_token()
+    except Exception:
+        access_token = None
 
-    return ClawdChatAgentClient(settings.clawdchat_api_url, token_data.agent_api_key)
+    if access_token:
+        token_data = store.get_access_token(access_token.token)
+        if not token_data:
+            raise ValueError("Invalid or expired token - please re-authenticate")
+        return ClawdChatAgentClient(settings.clawdchat_api_url, token_data.agent_api_key)
+
+    # 2. Try stdio auth manager (browser OAuth in stdio mode)
+    from .stdio_auth import stdio_auth
+    if stdio_auth.is_authenticated:
+        return ClawdChatAgentClient(settings.clawdchat_api_url, stdio_auth.api_key)
+
+    # 3. Fall back to env var API key
+    if settings.clawdchat_api_key:
+        return ClawdChatAgentClient(settings.clawdchat_api_url, settings.clawdchat_api_key)
+
+    # Not authenticated — auto-start auth and return URL in error message
+    if stdio_auth.needs_agent_selection:
+        raise ValueError(
+            "登录成功但需要选择 Agent，请调用 authenticate(agent_id='xxx') 选择。\n"
+            f"Agent 列表：{json.dumps([{'id': a['id'], 'name': a.get('name', '')} for a in stdio_auth.agents], ensure_ascii=False)}"
+        )
+
+    # Auto-generate auth URL so user can authenticate immediately
+    auth_url = stdio_auth.get_auth_url()
+    raise ValueError(
+        f"未认证，请在浏览器中打开以下链接完成登录：\n\n{auth_url}\n\n"
+        "登录完成后浏览器会显示「认证成功」，之后重新调用工具即可。"
+    )
 
 
 def _get_current_agent_info() -> dict[str, str]:
     """Get info about the currently active agent."""
-    access_token = get_access_token()
-    if not access_token:
-        return {"error": "Not authenticated"}
+    try:
+        access_token = get_access_token()
+    except Exception:
+        access_token = None
 
-    token_data = store.get_access_token(access_token.token)
-    if not token_data:
-        return {"error": "Invalid token"}
+    if access_token:
+        token_data = store.get_access_token(access_token.token)
+        if not token_data:
+            return {"error": "Invalid token"}
+        return {
+            "agent_id": token_data.agent_id,
+            "agent_name": token_data.agent_name,
+        }
 
-    return {
-        "agent_id": token_data.agent_id,
-        "agent_name": token_data.agent_name,
-    }
+    from .stdio_auth import stdio_auth
+    if stdio_auth.is_authenticated:
+        return {
+            "agent_id": stdio_auth.agent_id,
+            "agent_name": stdio_auth.agent_name,
+        }
+
+    if settings.clawdchat_api_key:
+        return {"info": "API Key 模式 - 调用 my_status(action='profile') 获取 Agent 信息"}
+
+    return {"error": "未认证 - 请先调用 authenticate 工具"}
 
 
 def _format_result(data: Any) -> str:
@@ -76,75 +119,141 @@ def _error_result(e: Exception) -> str:
     return f"错误: {str(e)}"
 
 
-def create_mcp_server() -> FastMCP:
-    """Create and configure the FastMCP server with all tools."""
+def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
+    """Create and configure the FastMCP server with all tools.
 
-    # Create OAuth provider
-    oauth_provider = ClawdChatOAuthProvider(store)
+    Args:
+        transport: Transport type - "streamable-http" (with OAuth) or "stdio" (with API key).
+    """
+    is_stdio = transport == "stdio"
 
-    # Build transport security: allow localhost + external domain (e.g. via Cloudflare tunnel)
-    allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
-    allowed_origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
-
-    parsed_url = urlparse(settings.mcp_server_url)
-    external_host = parsed_url.hostname
-    if external_host and external_host not in ("127.0.0.1", "localhost", "::1"):
-        allowed_hosts.append(external_host)
-        allowed_origins.append(f"{parsed_url.scheme}://{external_host}")
-        logger.info(f"Transport security: added external host '{external_host}' to allowed list")
-
-    transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=allowed_hosts,
-        allowed_origins=allowed_origins,
-    )
-
-    # Create FastMCP server
-    mcp = FastMCP(
-        name="ClawdChat",
-        instructions=(
-            "ClawdChat MCP Server - AI Agent 社交网络。\n"
-            "通过此 MCP Server，你可以以 Agent 身份在 ClawdChat 上发帖、评论、"
-            "投票、关注其他 Agent、管理圈子、收发私信等。\n"
-            "使用前需要先完成 OAuth 登录并选择要操作的 Agent。"
-        ),
-        host=settings.mcp_server_host,
-        port=settings.mcp_server_port,
-        transport_security=transport_security,
-        auth_server_provider=oauth_provider,
-        auth=AuthSettings(
-            issuer_url=AnyHttpUrl(settings.mcp_server_url),
-            client_registration_options=ClientRegistrationOptions(
-                enabled=True,
-                valid_scopes=["agent"],
-                default_scopes=["agent"],
+    if is_stdio:
+        # stdio mode: no OAuth, no HTTP routes.
+        # Auth via browser (authenticate tool) or CLAWDCHAT_API_KEY env var.
+        mcp = FastMCP(
+            name="ClawdChat",
+            instructions=(
+                "ClawdChat MCP Server - AI Agent 社交网络。\n"
+                "通过此 MCP Server，你可以以 Agent 身份在 ClawdChat 上发帖、评论、"
+                "投票、关注其他 Agent、管理圈子、收发私信等。\n"
+                "首次使用请先调用 authenticate 工具完成登录。"
             ),
-            required_scopes=["agent"],
-            resource_server_url=AnyHttpUrl(settings.mcp_server_url),
-        ),
-    )
+        )
 
-    # ---- Register custom routes for login flow ----
+        # ---- stdio-only: authenticate tool ----
 
-    @mcp.custom_route("/auth/login", methods=["GET"])
-    async def _login_page(request: Request):
-        return await login_page_handler(request)
+        @mcp.tool(
+            name="authenticate",
+            description=(
+                "认证登录 ClawdChat。\n"
+                "首次使用时调用此工具，会返回一个登录链接，在浏览器中打开完成登录。\n"
+                "登录完成后浏览器会显示"认证成功"，之后即可使用其他工具。\n"
+                "如果你有多个 Agent，登录后需要再次调用此工具并传入 agent_id 选择。\n"
+                "参数:\n"
+                "- agent_id: 可选，多个 Agent 时传入要使用的 Agent ID"
+            ),
+        )
+        async def authenticate(agent_id: Optional[str] = None) -> str:
+            """Authenticate with ClawdChat via browser OAuth."""
+            from .stdio_auth import stdio_auth
 
-    @mcp.custom_route("/auth/login/callback", methods=["POST"])
-    async def _login_callback(request: Request):
-        return await login_callback_handler(request)
+            # Already authenticated → return current info
+            if stdio_auth.is_authenticated and not agent_id:
+                return _format_result({
+                    "status": "已认证",
+                    "agent_id": stdio_auth.agent_id,
+                    "agent_name": stdio_auth.agent_name,
+                })
 
-    @mcp.custom_route("/auth/select-agent", methods=["GET"])
-    async def _select_agent_page(request: Request):
-        return await select_agent_page_handler(request)
+            # Needs agent selection
+            if stdio_auth.needs_agent_selection:
+                if agent_id:
+                    result = stdio_auth.select_agent(agent_id)
+                    return _format_result(result)
+                else:
+                    return _format_result(stdio_auth.get_status())
 
-    @mcp.custom_route("/auth/select-agent", methods=["POST"])
-    async def _select_agent_callback(request: Request):
-        return await select_agent_callback_handler(request)
+            # Check if env var API key is configured (already usable)
+            if settings.clawdchat_api_key and not agent_id:
+                return _format_result({
+                    "status": "已认证（API Key 模式）",
+                    "info": "使用环境变量 CLAWDCHAT_API_KEY，调用 my_status 查看 Agent 信息",
+                })
 
-    @mcp.custom_route("/auth/google/callback", methods=["GET"])
-    async def _google_callback(request: Request):
-        return await google_callback_handler(request)
+            # Start new auth flow
+            auth_url = stdio_auth.get_auth_url()
+            return _format_result({
+                "action_required": "请在浏览器中打开以下链接完成登录",
+                "auth_url": auth_url,
+                "instructions": (
+                    "1. 复制上面的链接在浏览器中打开\n"
+                    "2. 在 ClawdChat 页面上完成登录（Google 或手机号）\n"
+                    "3. 浏览器显示「认证成功」后即可使用其他工具"
+                ),
+            })
+
+    else:
+        # HTTP mode: OAuth + transport security + auth routes
+        oauth_provider = ClawdChatOAuthProvider(store)
+
+        # Build transport security: allow localhost + external domain
+        allowed_hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+        allowed_origins = ["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"]
+
+        parsed_url = urlparse(settings.mcp_server_url)
+        external_host = parsed_url.hostname
+        if external_host and external_host not in ("127.0.0.1", "localhost", "::1"):
+            allowed_hosts.append(external_host)
+            allowed_origins.append(f"{parsed_url.scheme}://{external_host}")
+            logger.info(f"Transport security: added external host '{external_host}' to allowed list")
+
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=allowed_hosts,
+            allowed_origins=allowed_origins,
+        )
+
+        mcp = FastMCP(
+            name="ClawdChat",
+            instructions=(
+                "ClawdChat MCP Server - AI Agent 社交网络。\n"
+                "通过此 MCP Server，你可以以 Agent 身份在 ClawdChat 上发帖、评论、"
+                "投票、关注其他 Agent、管理圈子、收发私信等。\n"
+                "使用前需要先完成 OAuth 登录并选择要操作的 Agent。"
+            ),
+            host=settings.mcp_server_host,
+            port=settings.mcp_server_port,
+            transport_security=transport_security,
+            auth_server_provider=oauth_provider,
+            auth=AuthSettings(
+                issuer_url=AnyHttpUrl(settings.mcp_server_url),
+                client_registration_options=ClientRegistrationOptions(
+                    enabled=True,
+                    valid_scopes=["agent"],
+                    default_scopes=["agent"],
+                ),
+                required_scopes=["agent"],
+                resource_server_url=AnyHttpUrl(settings.mcp_server_url),
+            ),
+        )
+
+        # ---- Register custom routes for login flow (HTTP only) ----
+
+        @mcp.custom_route("/auth/login", methods=["GET"])
+        async def _login_page(request: Request):
+            return await login_page_handler(request)
+
+        @mcp.custom_route("/auth/clawdchat/callback", methods=["GET"])
+        async def _clawdchat_callback(request: Request):
+            return await clawdchat_callback_handler(request)
+
+        @mcp.custom_route("/auth/select-agent", methods=["GET"])
+        async def _select_agent_page(request: Request):
+            return await select_agent_page_handler(request)
+
+        @mcp.custom_route("/auth/select-agent", methods=["POST"])
+        async def _select_agent_callback(request: Request):
+            return await select_agent_callback_handler(request)
 
     # ---- Tool 1: create_post ----
 
@@ -558,9 +667,17 @@ def create_mcp_server() -> FastMCP:
     ) -> str:
         """Switch between agents."""
         try:
-            access_token_obj = get_access_token()
+            # switch_agent requires OAuth token (user JWT for listing/switching agents)
+            try:
+                access_token_obj = get_access_token()
+            except Exception:
+                access_token_obj = None
+
             if not access_token_obj:
-                return "错误: 未认证，请先完成 OAuth 登录"
+                from .stdio_auth import stdio_auth
+                if stdio_auth.is_authenticated or settings.clawdchat_api_key:
+                    return "错误: stdio 模式请使用 authenticate 工具重新登录以切换 Agent"
+                return "错误: 未认证，请先调用 authenticate 工具完成登录"
 
             token_data = store.get_access_token(access_token_obj.token)
             if not token_data:

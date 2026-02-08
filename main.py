@@ -1,9 +1,13 @@
 """ClawdChat MCP Server - Entry point.
 
 Usage:
-    uv run mcp        # 推荐方式
-    # or
-    uv run main.py    # 传统方式
+    # 通过 uvx（推荐，无需 clone）
+    uvx clawdchat-mcp                                # stdio 模式（默认）
+    uvx clawdchat-mcp --transport streamable-http     # HTTP 模式
+
+    # 本地开发
+    uv run python main.py
+    uv run python main.py --transport streamable-http
 """
 
 from clawdchat_mcp import main
