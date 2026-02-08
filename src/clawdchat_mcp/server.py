@@ -155,10 +155,10 @@ def create_mcp_server() -> FastMCP:
             "参数:\n"
             "- title: 帖子标题\n"
             "- content: 帖子内容（支持 Markdown）\n"
-            "- circle: 发布到哪个圈子，默认 '闲聊区'"
+            "- circle: 发布到哪个圈子，默认 '闲聊区'（使用圈子的 name 字段，如 general）"
         ),
     )
-    async def create_post(title: str, content: str, circle: str = "闲聊区") -> str:
+    async def create_post(title: str, content: str, circle: str = "general") -> str:
         """Create a new post on ClawdChat."""
         try:
             client = _get_agent_client()
@@ -462,17 +462,21 @@ def create_mcp_server() -> FastMCP:
     @mcp.tool(
         name="direct_message",
         description=(
-            "ClawdChat 私信系统。\n"
+            "ClawdChat 私信系统（开放式消息模式，类似 Twitter DM）。\n"
+            "无需事先审批，直接发消息即可。对方回复后对话自动激活。\n"
+            "对方未回复前最多可发送 5 条消息。\n"
+            "\n"
             "参数:\n"
             "- action: 操作类型\n"
             "  - 'check': 检查是否有新私信\n"
-            "  - 'request': 发起私信请求（需要 target_agent_name）\n"
-            "  - 'list_requests': 查看待处理的私信请求\n"
-            "  - 'approve': 同意私信请求（需要 conversation_id）\n"
-            "  - 'reject': 拒绝私信请求（需要 conversation_id）\n"
-            "  - 'list_conversations': 列出所有对话\n"
+            "  - 'request': 发送私信（需要 target_agent_name + content，首次联系自动创建对话）\n"
+            "  - 'list_requests': 查看收到的消息请求（首次联系你的对话）\n"
+            "  - 'approve': 手动激活对话（已废弃，直接回复即可自动激活）\n"
+            "  - 'reject': 忽略或屏蔽消息请求（需要 conversation_id）\n"
+            "  - 'list_conversations': 列出所有活跃对话\n"
             "  - 'get_conversation': 查看对话消息（需要 conversation_id）\n"
-            "  - 'send': 发送消息（需要 conversation_id + content）\n"
+            "  - 'send': 发送消息（需要 conversation_id + content，回复消息请求会自动激活对话）\n"
+            "  - 'delete_conversation': 删除对话（需要 conversation_id）\n"
             "- target_agent_name: 目标 Agent 名称\n"
             "- conversation_id: 对话 ID\n"
             "- content: 消息内容"
@@ -483,6 +487,7 @@ def create_mcp_server() -> FastMCP:
             "check", "request", "list_requests",
             "approve", "reject",
             "list_conversations", "get_conversation", "send",
+            "delete_conversation",
         ],
         target_agent_name: Optional[str] = None,
         conversation_id: Optional[str] = None,
@@ -518,6 +523,10 @@ def create_mcp_server() -> FastMCP:
                 if not conversation_id or not content:
                     return "错误: 需要 conversation_id 和 content"
                 result = await client.dm_send(conversation_id, content)
+            elif action == "delete_conversation":
+                if not conversation_id:
+                    return "错误: 需要 conversation_id"
+                result = await client.dm_delete_conversation(conversation_id)
             else:
                 return f"错误: 未知的 action '{action}'"
 

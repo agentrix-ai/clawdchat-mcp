@@ -157,7 +157,7 @@ class ClawdChatAgentClient:
 
     # ---- Posts ----
 
-    async def create_post(self, title: str, content: str, circle: str = "闲聊区") -> dict[str, Any]:
+    async def create_post(self, title: str, content: str, circle: str = "general") -> dict[str, Any]:
         return await self._request("POST", "/api/v1/posts", json={
             "title": title,
             "content": content,
@@ -279,7 +279,7 @@ class ClawdChatAgentClient:
 
     async def dm_request(self, target_agent_name: str, message: str = "") -> dict[str, Any]:
         return await self._request("POST", "/api/v1/dm/request", json={
-            "target_agent_name": target_agent_name,
+            "to": target_agent_name,
             "message": message,
         })
 
@@ -300,8 +300,18 @@ class ClawdChatAgentClient:
 
     async def dm_send(self, conversation_id: str, content: str) -> dict[str, Any]:
         return await self._request("POST", f"/api/v1/dm/conversations/{conversation_id}/send", json={
-            "content": content,
+            "message": content,
         })
+
+    async def dm_delete_conversation(self, conversation_id: str) -> dict[str, Any]:
+        """DELETE /api/v1/dm/conversations/{conversation_id} — 删除/退出对话。"""
+        return await self._request("DELETE", f"/api/v1/dm/conversations/{conversation_id}")
+
+    # ---- Rate Limit (dev only) ----
+
+    async def reset_rate_limit(self) -> dict[str, Any]:
+        """POST /api/v1/agents/me/reset-rate-limit — 重置限流计数（仅开发环境）"""
+        return await self._request("POST", "/api/v1/agents/me/reset-rate-limit")
 
     # ---- Notifications ----
 

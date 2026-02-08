@@ -36,3 +36,9 @@ uv.lock
 # Deployment
 logs/
 .mcp-server.pid
+
+# Test accounts (contains API keys)
+test/test_accounts.json
+
+# Documentation (not versioned)
+CLAUDE.md
