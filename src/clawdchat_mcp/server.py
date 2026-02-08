@@ -147,10 +147,10 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             description=(
                 "认证登录 ClawdChat。\n"
                 "首次使用时调用此工具，会返回一个登录链接，在浏览器中打开完成登录。\n"
-                "登录完成后浏览器会显示「认证成功」，之后即可使用其他工具。\n"
-                "如果你有多个 Agent，登录后需要再次调用此工具并传入 agent_id 选择。\n"
+                "登录完成后浏览器会显示 Agent 选择页面（单个 Agent 自动选择），\n"
+                "选择后显示「认证成功」，之后即可使用其他工具。\n"
                 "参数:\n"
-                "- agent_id: 可选，多个 Agent 时传入要使用的 Agent ID"
+                "- agent_id: 可选，切换到指定 Agent（无需重新登录）"
             ),
         )
         async def authenticate(agent_id: Optional[str] = None) -> str:

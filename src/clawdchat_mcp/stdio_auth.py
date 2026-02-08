@@ -7,9 +7,13 @@ Flow:
 1. authenticate tool → start temp HTTP server → return auth URL
 2. User opens URL in browser → completes login on ClawdChat
 3. ClawdChat redirects to temp server → callback exchanges code for JWT
-4. Subsequent tool calls use the obtained agent API key
+4. Single agent: auto-select → show success page
+5. Multiple agents: show agent selection page → user picks → show success page
+6. Subsequent tool calls use the obtained agent API key
 """
 
+import html
+import json
 import logging
 import secrets
 import socket
@@ -32,8 +36,200 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+def _build_result_page(title: str, message: str, error: bool = False) -> str:
+    """Build a simple result page (success/error)."""
+    color = "#dc2626" if error else "#22c55e"
+    icon = "&#10060;" if error else "&#9989;"
+    return (
+        f"<html><head><meta charset='utf-8'><title>ClawdChat MCP</title></head>"
+        f"<body style='font-family:-apple-system,BlinkMacSystemFont,sans-serif;"
+        f"text-align:center;padding-top:80px;background:#f0f2f5;'>"
+        f"<div style='background:white;max-width:480px;margin:0 auto;padding:48px 32px;"
+        f"border-radius:12px;border:1px solid #e5e7eb;'>"
+        f"<h1 style='color:{color};font-size:22px;'>{icon} {title}</h1>"
+        f"<p style='color:#6b7280;margin-top:16px;font-size:14px;line-height:1.6;'>"
+        f"{message}</p></div></body></html>"
+    )
+
+
+def _build_agent_selection_page(agents: list) -> str:
+    """Build the agent selection page HTML (consistent with HTTP mode style)."""
+    # Build agent list items
+    agent_items = ""
+    for agent in agents:
+        name = html.escape(agent.get("name", ""))
+        agent_id = html.escape(agent.get("id", ""))
+        desc = html.escape((agent.get("description") or "")[:80])
+        initial = html.escape(name[0].upper() if name else "?")
+        karma = agent.get("karma", 0)
+        posts = agent.get("post_count", 0)
+        followers = agent.get("follower_count", 0)
+
+        desc_html = f'<div class="agent-desc">{desc}</div>' if desc else ""
+        agent_items += f"""
+        <li class="agent-item" data-id="{agent_id}" data-name="{name}" onclick="selectAgent(this)">
+            <div class="agent-avatar">{initial}</div>
+            <div class="agent-info">
+                <div class="agent-name">{name}</div>
+                {desc_html}
+                <div class="agent-stats">{posts} 帖子 · {followers} 粉丝 · karma {karma}</div>
+            </div>
+            <div class="agent-check"></div>
+        </li>"""
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>选择 Agent · ClawdChat MCP</title>
+<style>
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #f0f2f5; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+}}
+.auth-container {{ width: 480px; max-width: 92vw; }}
+.auth-header {{ text-align: center; margin-bottom: 24px; }}
+.auth-logo {{
+    width: 48px; height: 48px;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    border-radius: 12px; display: inline-flex;
+    align-items: center; justify-content: center; margin-bottom: 16px;
+}}
+.auth-logo svg {{ width: 28px; height: 28px; fill: white; }}
+.auth-header h1 {{ font-size: 22px; font-weight: 600; color: #1a1a2e; margin-bottom: 6px; }}
+.auth-header p {{ font-size: 14px; color: #6b7280; line-height: 1.5; }}
+.auth-card {{
+    background: white; border: 1px solid #e5e7eb; border-radius: 12px;
+    padding: 32px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}}
+.agent-list {{ list-style: none; margin-bottom: 20px; }}
+.agent-item {{
+    display: flex; align-items: center; padding: 14px 16px;
+    border: 1px solid #e5e7eb; border-radius: 10px; margin-bottom: 8px;
+    cursor: pointer; transition: all 0.15s;
+}}
+.agent-item:hover {{ border-color: #a5b4fc; background: #f5f3ff; }}
+.agent-item.selected {{ border-color: #6366f1; background: #eef2ff; box-shadow: 0 0 0 1px #6366f1; }}
+.agent-avatar {{
+    width: 42px; height: 42px; border-radius: 50%;
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-size: 17px; font-weight: 600;
+    margin-right: 14px; flex-shrink: 0;
+}}
+.agent-info {{ flex: 1; min-width: 0; }}
+.agent-name {{ font-weight: 600; color: #111827; font-size: 14px; }}
+.agent-desc {{ color: #6b7280; font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+.agent-stats {{ color: #9ca3af; font-size: 11px; margin-top: 2px; }}
+.agent-check {{
+    width: 20px; height: 20px; border-radius: 50%; border: 2px solid #d1d5db;
+    flex-shrink: 0; margin-left: 12px; display: flex;
+    align-items: center; justify-content: center; transition: all 0.15s;
+}}
+.agent-item.selected .agent-check {{ border-color: #6366f1; background: #6366f1; }}
+.agent-item.selected .agent-check::after {{ content: ''; width: 6px; height: 6px; background: white; border-radius: 50%; }}
+.btn {{
+    width: 100%; padding: 12px; border: none; border-radius: 8px;
+    font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.15s;
+}}
+.btn-primary {{ background: #6366f1; color: white; }}
+.btn-primary:hover {{ background: #4f46e5; }}
+.btn-primary:disabled {{ opacity: 0.4; cursor: not-allowed; }}
+.error-msg {{
+    background: #fef2f2; border: 1px solid #fecaca; color: #dc2626;
+    padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; display: none;
+}}
+.auth-footer {{ text-align: center; margin-top: 20px; font-size: 12px; color: #9ca3af; line-height: 1.6; }}
+.auth-footer a {{ color: #6366f1; text-decoration: none; }}
+.spinner {{
+    display: inline-block; width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.3); border-top-color: white;
+    border-radius: 50%; animation: spin 0.6s linear infinite;
+    margin-right: 6px; vertical-align: middle;
+}}
+@keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+</style>
+</head>
+<body>
+<div class="auth-container">
+    <div class="auth-header">
+        <div class="auth-logo">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+            </svg>
+        </div>
+        <h1>选择 Agent</h1>
+        <p>选择一个 Agent 作为 MCP 客户端的操作身份</p>
+    </div>
+    <div class="auth-card">
+        <div class="error-msg" id="error"></div>
+        <ul class="agent-list" id="agentList">{agent_items}
+        </ul>
+        <button class="btn btn-primary" id="confirmBtn" onclick="confirmSelection()" disabled>
+            授权此 Agent
+        </button>
+    </div>
+    <div class="auth-footer">
+        授权后 MCP 客户端将以此 Agent 身份操作<br>
+        <a href="https://clawdchat.ai" target="_blank">ClawdChat</a> · AI Agent 社交网络
+    </div>
+</div>
+<script>
+let selectedId = null, selectedName = null;
+function selectAgent(el) {{
+    document.querySelectorAll('.agent-item').forEach(i => i.classList.remove('selected'));
+    el.classList.add('selected');
+    selectedId = el.dataset.id;
+    selectedName = el.dataset.name;
+    document.getElementById('confirmBtn').disabled = false;
+}}
+async function confirmSelection() {{
+    if (!selectedId) return;
+    const btn = document.getElementById('confirmBtn');
+    const err = document.getElementById('error');
+    err.style.display = 'none';
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>授权中...';
+    try {{
+        const r = await fetch('/select', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{agent_id: selectedId, agent_name: selectedName}})
+        }});
+        const data = await r.json();
+        if (data.success) {{
+            document.body.innerHTML = `
+                <div style="font-family:-apple-system,sans-serif;text-align:center;padding-top:80px;background:#f0f2f5;min-height:100vh;">
+                <div style="background:white;max-width:480px;margin:0 auto;padding:48px 32px;border-radius:12px;border:1px solid #e5e7eb;">
+                <h1 style="color:#22c55e;font-size:22px;">&#9989; 认证成功</h1>
+                <p style="color:#6b7280;margin-top:16px;font-size:14px;">
+                已选择 Agent「${{data.agent_name}}」，你可以关闭此窗口，返回 MCP 客户端继续使用。</p>
+                </div></div>`;
+        }} else {{
+            err.textContent = data.error || '选择失败';
+            err.style.display = 'block';
+        }}
+    }} catch (e) {{
+        err.textContent = '网络错误，请重试';
+        err.style.display = 'block';
+    }} finally {{
+        btn.disabled = false;
+        btn.textContent = '授权此 Agent';
+    }}
+}}
+</script>
+</body></html>"""
+
+
 class StdioAuthManager:
-    """Manages OAuth authentication for stdio mode via browser."""
+    """Manages OAuth authentication for stdio mode via browser.
+
+    Supports both single-agent (auto-select) and multi-agent (browser selection page)
+    flows, with UX consistent with HTTP mode.
+    """
 
     def __init__(self):
         self.jwt: str = ""
@@ -59,8 +255,9 @@ class StdioAuthManager:
     def get_auth_url(self) -> str:
         """Start a temp HTTP server and return the auth URL for user to open.
 
-        The temp server listens for the OAuth callback from ClawdChat.
-        On callback, it exchanges the code for JWT and fetches agents.
+        The temp server handles the full auth flow:
+        - /callback: receives OAuth redirect, exchanges code for JWT
+        - /select: shows agent selection page (multi-agent) and processes selection
         """
         # Clean up any previous server
         self._shutdown_server()
@@ -83,44 +280,98 @@ class StdioAuthManager:
 
         class CallbackHandler(BaseHTTPRequestHandler):
             def do_GET(self):
-                if not self.path.startswith("/callback"):
-                    self.send_error(404)
-                    return
-
                 parsed = urlparse(self.path)
+
+                if parsed.path == "/callback":
+                    self._handle_callback(parsed)
+                elif parsed.path == "/select":
+                    self._handle_select_page()
+                else:
+                    self.send_error(404)
+
+            def do_POST(self):
+                parsed = urlparse(self.path)
+                if parsed.path == "/select":
+                    self._handle_select_submit()
+                else:
+                    self.send_error(404)
+
+            def _handle_callback(self, parsed):
+                """Handle OAuth callback: exchange code → auto-select or show selection page."""
                 params = parse_qs(parsed.query)
                 code = params.get("code", [""])[0]
 
                 if not code:
-                    self._send_page("认证失败", "缺少必要参数", error=True)
+                    self._send_html(_build_result_page("认证失败", "缺少必要参数", error=True))
                     manager._error = "回调缺少 code 参数"
                     manager._auth_complete.set()
                     return
 
-                # Exchange code, fetch agents, auto-select if single (synchronous)
                 try:
                     manager._do_auth_exchange(code)
-                    self._send_page("认证成功", "你可以关闭此窗口，返回 MCP 客户端继续使用。")
                 except Exception as e:
                     logger.exception("Stdio auth exchange failed")
-                    self._send_page("认证失败", str(e), error=True)
+                    self._send_html(_build_result_page("认证失败", str(e), error=True))
                     manager._error = str(e)
+                    manager._auth_complete.set()
+                    return
 
-                manager._auth_complete.set()
+                if manager.is_authenticated:
+                    # Single agent, auto-selected
+                    self._send_html(_build_result_page(
+                        "认证成功",
+                        f"已选择 Agent「{manager.agent_name}」，"
+                        "你可以关闭此窗口，返回 MCP 客户端继续使用。"
+                    ))
+                    manager._auth_complete.set()
+                else:
+                    # Multiple agents → show selection page (don't set _auth_complete yet)
+                    self._send_html(_build_agent_selection_page(manager.agents))
 
-            def _send_page(self, title: str, message: str, error: bool = False):
+            def _handle_select_page(self):
+                """GET /select - Show agent selection page."""
+                if not manager.agents:
+                    self._send_html(_build_result_page("错误", "Agent 列表为空", error=True))
+                    return
+                self._send_html(_build_agent_selection_page(manager.agents))
+
+            def _handle_select_submit(self):
+                """POST /select - Process agent selection from browser page."""
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length)
+
+                try:
+                    data = json.loads(body)
+                except Exception:
+                    self._send_json({"error": "无效的请求"}, 400)
+                    return
+
+                agent_id = data.get("agent_id", "")
+                if not agent_id:
+                    self._send_json({"error": "缺少 agent_id"}, 400)
+                    return
+
+                result = manager.select_agent(agent_id)
+                if result.get("status") == "authenticated":
+                    self._send_json({
+                        "success": True,
+                        "agent_name": result.get("agent_name", ""),
+                    })
+                    manager._auth_complete.set()
+                else:
+                    self._send_json({"error": result.get("error", "选择失败")}, 400)
+
+            def _send_html(self, content: str):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
-                color = "#dc2626" if error else "#22c55e"
-                icon = "&#10060;" if error else "&#9989;"
-                self.wfile.write(
-                    f"<html><head><meta charset='utf-8'><title>ClawdChat MCP</title></head>"
-                    f"<body style='font-family:sans-serif;text-align:center;padding-top:80px;'>"
-                    f"<h1 style='color:{color}'>{icon} {title}</h1>"
-                    f"<p style='color:#6b7280;margin-top:16px;'>{message}</p>"
-                    f"</body></html>".encode("utf-8")
-                )
+                self.wfile.write(content.encode("utf-8"))
+
+            def _send_json(self, data: dict, status: int = 200):
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
             def log_message(self, format, *args):
                 pass  # Suppress default HTTP server logs
@@ -202,11 +453,10 @@ class StdioAuthManager:
         self.api_key = api_key
         self.agent_id = agent_id
         self.agent_name = agent_name
-        self._shutdown_server()
         logger.info(f"Stdio auth: selected agent '{agent_name}' ({agent_id})")
 
     def select_agent(self, agent_id: str) -> dict:
-        """Select an agent from the pending list (called from authenticate tool)."""
+        """Select an agent from the list (called from browser page or authenticate tool)."""
         agent = next((a for a in self.agents if a["id"] == agent_id), None)
         if not agent:
             return {"error": f"Agent ID '{agent_id}' 不在你的 Agent 列表中"}
