@@ -29,6 +29,10 @@ def main() -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         stream=sys.stderr if args.transport == "stdio" else None,
     )
+    # 抑制第三方库的 INFO 日志噪音（Cursor MCP 面板会把 stderr 统一显示为 [error]）
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("mcp.server").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     logger = logging.getLogger(__name__)
     logger.info(f"Starting ClawdChat MCP Server (transport: {args.transport})")

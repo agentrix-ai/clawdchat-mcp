@@ -157,6 +157,11 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             """Authenticate with ClawdChat via browser OAuth."""
             from .stdio_auth import stdio_auth
 
+            # Agent switch: have JWT + agents list, select directly without re-auth
+            if agent_id and stdio_auth.jwt and stdio_auth.agents:
+                result = stdio_auth.select_agent(agent_id)
+                return _format_result(result)
+
             # Already authenticated → return current info
             if stdio_auth.is_authenticated and not agent_id:
                 return _format_result({
@@ -165,13 +170,9 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                     "agent_name": stdio_auth.agent_name,
                 })
 
-            # Needs agent selection
+            # Needs agent selection (JWT obtained but no agent selected yet)
             if stdio_auth.needs_agent_selection:
-                if agent_id:
-                    result = stdio_auth.select_agent(agent_id)
-                    return _format_result(result)
-                else:
-                    return _format_result(stdio_auth.get_status())
+                return _format_result(stdio_auth.get_status())
 
             # Check if env var API key is configured (already usable)
             if settings.clawdchat_api_key and not agent_id:
@@ -667,29 +668,52 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
     ) -> str:
         """Switch between agents."""
         try:
-            # switch_agent requires OAuth token (user JWT for listing/switching agents)
+            # Determine auth source: OAuth token (HTTP) or stdio_auth (stdio)
             try:
                 access_token_obj = get_access_token()
             except Exception:
                 access_token_obj = None
 
-            if not access_token_obj:
-                from .stdio_auth import stdio_auth
+            token_data = None
+            if access_token_obj:
+                token_data = store.get_access_token(access_token_obj.token)
+
+            # stdio mode: use stdio_auth JWT
+            from .stdio_auth import stdio_auth
+            use_stdio = token_data is None and stdio_auth.jwt
+
+            if not token_data and not use_stdio:
                 if stdio_auth.is_authenticated or settings.clawdchat_api_key:
-                    return "错误: stdio 模式请使用 authenticate 工具重新登录以切换 Agent"
+                    return "错误: 请先调用 authenticate 工具登录以获取用户凭证"
                 return "错误: 未认证，请先调用 authenticate 工具完成登录"
 
-            token_data = store.get_access_token(access_token_obj.token)
-            if not token_data:
-                return "错误: token 无效或已过期"
-
+            # --- action: current ---
             if action == "current":
+                if use_stdio:
+                    if stdio_auth.is_authenticated:
+                        return _format_result({
+                            "current_agent_id": stdio_auth.agent_id,
+                            "current_agent_name": stdio_auth.agent_name,
+                        })
+                    return _format_result({"message": "已登录但尚未选择 Agent"})
                 return _format_result({
                     "current_agent_id": token_data.agent_id,
                     "current_agent_name": token_data.agent_name,
                 })
 
+            # --- action: list ---
             elif action == "list":
+                if use_stdio:
+                    # Use cached agents list, or refresh from API
+                    if stdio_auth.agents:
+                        return _format_result({
+                            "agents": [
+                                {"id": a["id"], "name": a.get("name", "")}
+                                for a in stdio_auth.agents
+                            ]
+                        })
+                    return "错误: Agent 列表为空，请重新调用 authenticate 登录"
+
                 user_client = ClawdChatUserClient(
                     settings.clawdchat_api_url, token_data.user_jwt
                 )
@@ -699,9 +723,15 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                 except ClawdChatAPIError as e:
                     return f"错误: {e.detail}"
 
+            # --- action: switch ---
             elif action == "switch":
                 if not agent_id:
                     return "错误: 需要 agent_id"
+
+                if use_stdio:
+                    # Delegate to stdio_auth.select_agent
+                    result = stdio_auth.select_agent(agent_id)
+                    return _format_result(result)
 
                 user_client = ClawdChatUserClient(
                     settings.clawdchat_api_url, token_data.user_jwt
