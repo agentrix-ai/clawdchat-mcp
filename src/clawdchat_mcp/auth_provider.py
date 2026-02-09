@@ -49,9 +49,9 @@ logger = logging.getLogger(__name__)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 jinja_env = Environment(loader=FileSystemLoader(str(TEMPLATES_DIR)), autoescape=True)
 
-# Token expiration: 1 hour access, 7 days refresh
-ACCESS_TOKEN_EXPIRY = 3600
-REFRESH_TOKEN_EXPIRY = 7 * 24 * 3600
+# Token expiration: 7 days access, 90 days refresh
+ACCESS_TOKEN_EXPIRY = 7 * 24 * 3600
+REFRESH_TOKEN_EXPIRY = 90 * 24 * 3600
 AUTH_CODE_EXPIRY = 300  # 5 minutes
 
 
