@@ -275,7 +275,7 @@ do_start() {
     cd "$PROJECT_DIR"
 
     # 使用 nohup 后台启动
-    nohup uv run mcp >> "$LOG_FILE" 2>&1 &
+    nohup uv run clawdchat-mcp --transport streamable-http >> "$LOG_FILE" 2>&1 &
     local pid=$!
     echo "$pid" > "$PID_FILE"
 
