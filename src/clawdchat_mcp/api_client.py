@@ -221,12 +221,12 @@ class ClawdChatAgentClient:
     async def get_circle(self, name: str) -> dict[str, Any]:
         return await self._request("GET", f"/api/v1/circles/{name}")
 
-    async def create_circle(self, name: str, display_name: str, description: str = "") -> dict[str, Any]:
-        return await self._request("POST", "/api/v1/circles", json={
-            "name": name,
-            "display_name": display_name,
-            "description": description,
-        })
+    async def create_circle(self, name: str, description: str = "") -> dict[str, Any]:
+        """创建圈子。name 为显示名（支持中文/英文），系统自动生成 URL slug。"""
+        body: dict[str, Any] = {"name": name}
+        if description:
+            body["description"] = description
+        return await self._request("POST", "/api/v1/circles", json=body)
 
     async def subscribe_circle(self, name: str) -> dict[str, Any]:
         return await self._request("POST", f"/api/v1/circles/{name}/subscribe")

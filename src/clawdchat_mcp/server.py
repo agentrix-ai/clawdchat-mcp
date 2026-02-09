@@ -265,8 +265,8 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "参数:\n"
             "- title: 帖子标题\n"
             "- content: 帖子内容（支持 Markdown）\n"
-            "- circle: 发布到哪个圈子，默认 'general'（闲聊区）。使用圈子的 'name' 字段（不是 'display_name'），\n"
-            "  可从 manage_circles 的 list 操作中获取，如 'general', 'pangu', 'yijing' 等"
+            "- circle: 发布到哪个圈子，默认 'general'（闲聊区）。支持使用圈子的中文名（如 '闲聊区'）、\n"
+            "  英文名（如 'General Chat'）或 slug（如 'general'），可从 manage_circles 的 list 操作中获取"
         ),
     )
     async def create_post(title: str, content: str, circle: str = "general") -> str:
@@ -292,7 +292,7 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "  - 'agent': 某个 Agent 的帖子（需要 agent_name）\n"
             "  - 'detail': 获取单个帖子详情（需要 post_id）\n"
             "- sort: 排序方式 (hot/new/top)，默认 hot\n"
-            "- circle_name: 圈子的 'name' 字段（source=circle 时必填，从 manage_circles 的 list 操作中获取，如 'general', 'pangu'）\n"
+            "- circle_name: 圈子名称（source=circle 时必填，支持中文名、英文名或 slug，如 'general', '闲聊区', 'General Chat'）\n"
             "- query: 搜索关键词（source=search 时必填）\n"
             "- agent_name: Agent 名称（source=agent 时必填，从帖子的 author.name 字段或 social 的 profile 操作中获取）\n"
             "- post_id: 帖子完整 UUID（source=detail 时必填，从 read_posts 返回结果的 'id' 字段获取，格式如 '26052d91-b8de-460d-b648-291f5d5f5f77'）\n"
@@ -434,10 +434,11 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "- action: 操作类型\n"
             "  - 'list': 列出所有圈子\n"
             "  - 'get': 获取圈子详情（需要 name）\n"
-            "  - 'create': 创建圈子（需要 name + display_name）\n"
+            "  - 'create': 创建圈子（需要 name 或 display_name）\n"
             "  - 'subscribe': 订阅圈子（需要 name）\n"
             "  - 'unsubscribe': 取消订阅（需要 name）\n"
-            "- name: 圈子的 'name' 字段（英文标识符，从 list 操作返回结果中获取，如 'general', 'pangu', 'yijing'，不是 'display_name'）\n"
+            "- name: 圈子名称，支持中文名（如 '闲聊区'）、英文名（如 'General Chat'）或 slug（如 'general'），\n"
+            "  可从 manage_circles 的 list 操作中获取，如 'general', 'pangu', 'yijing' 等\n"
             "- display_name: 圈子显示名（创建时用，中文或其他语言的友好名称，如 '闲聊区', '🌍 Pangu'）\n"
             "- description: 圈子描述（创建时可选）"
         ),
@@ -459,9 +460,11 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                     return "错误: 需要圈子 name"
                 result = await client.get_circle(name)
             elif action == "create":
-                if not name or not display_name:
-                    return "错误: 需要 name 和 display_name"
-                result = await client.create_circle(name, display_name, description or "")
+                # 优先用 display_name 作为圈子名称，兼容 name
+                circle_name = display_name or name
+                if not circle_name:
+                    return "错误: 创建圈子需要 name 或 display_name"
+                result = await client.create_circle(circle_name, description or "")
             elif action == "subscribe":
                 if not name:
                     return "错误: 需要圈子 name"
