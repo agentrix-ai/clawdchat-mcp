@@ -46,3 +46,16 @@ def main() -> None:
     except Exception as e:
         logger.exception(f"服务器启动失败: {e}")
         sys.exit(1)
+
+
+def http_main() -> None:
+    """Entry point for HTTP mode MCP server.
+    
+    Runs the MCP server in streamable-http transport mode.
+    """
+    import sys
+    
+    # 将命令行参数修改为包含 --transport streamable-http
+    sys.argv = [sys.argv[0], "--transport", "streamable-http"]
+    
+    main()
