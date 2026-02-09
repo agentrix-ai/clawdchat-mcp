@@ -1,7 +1,8 @@
 """Storage for OAuth tokens, authorization codes, and clients.
 
-Client registrations are persisted to a JSON file so they survive server restarts.
-Tokens and auth codes are in-memory only (users re-authenticate after restart).
+Client registrations, access tokens, and refresh tokens are persisted to JSON
+files so they survive server restarts. Auth codes and pending logins are
+short-lived and kept in-memory only.
 """
 
 import json
@@ -14,8 +15,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# File to persist client registrations
-CLIENTS_FILE = Path(__file__).parent.parent.parent / ".oauth_clients.json"
+# Persistence files (sibling to project root)
+_DATA_DIR = Path(__file__).parent.parent.parent
+CLIENTS_FILE = _DATA_DIR / ".oauth_clients.json"
+TOKENS_FILE = _DATA_DIR / ".oauth_tokens.json"
 
 
 @dataclass
@@ -102,7 +105,11 @@ class PendingLogin:
 
 
 class TokenStore:
-    """Storage for all OAuth-related data. Client registrations are persisted to disk."""
+    """Storage for all OAuth-related data.
+
+    Persisted to disk (survive restarts): clients, access tokens, refresh tokens.
+    In-memory only (short-lived): auth codes, pending logins.
+    """
 
     def __init__(self):
         self.auth_codes: dict[str, AuthCodeData] = {}
@@ -111,8 +118,9 @@ class TokenStore:
         self.clients: dict[str, OAuthClientData] = {}
         self.pending_logins: dict[str, PendingLogin] = {}  # keyed by state
         self._load_clients()
+        self._load_tokens()
 
-    # ---- Auth Codes ----
+    # ---- Auth Codes (in-memory, short-lived) ----
 
     def store_auth_code(self, data: AuthCodeData) -> None:
         self.auth_codes[data.code] = data
@@ -127,20 +135,23 @@ class TokenStore:
     def consume_auth_code(self, code: str) -> Optional[AuthCodeData]:
         return self.auth_codes.pop(code, None)
 
-    # ---- Access Tokens ----
+    # ---- Access Tokens (persisted) ----
 
     def store_access_token(self, data: AccessTokenData) -> None:
         self.access_tokens[data.token] = data
+        self._save_tokens()
 
     def get_access_token(self, token: str) -> Optional[AccessTokenData]:
         data = self.access_tokens.get(token)
         if data and data.expires_at and data.expires_at < time.time():
             del self.access_tokens[token]
+            self._save_tokens()
             return None
         return data
 
     def revoke_access_token(self, token: str) -> None:
-        self.access_tokens.pop(token, None)
+        if self.access_tokens.pop(token, None) is not None:
+            self._save_tokens()
 
     def update_access_token_agent(
         self, token: str, agent_api_key: str, agent_id: str, agent_name: str
@@ -152,24 +163,28 @@ class TokenStore:
         data.agent_api_key = agent_api_key
         data.agent_id = agent_id
         data.agent_name = agent_name
+        self._save_tokens()
         return True
 
-    # ---- Refresh Tokens ----
+    # ---- Refresh Tokens (persisted) ----
 
     def store_refresh_token(self, data: RefreshTokenData) -> None:
         self.refresh_tokens[data.token] = data
+        self._save_tokens()
 
     def get_refresh_token(self, token: str) -> Optional[RefreshTokenData]:
         data = self.refresh_tokens.get(token)
         if data and data.expires_at and data.expires_at < time.time():
             del self.refresh_tokens[token]
+            self._save_tokens()
             return None
         return data
 
     def revoke_refresh_token(self, token: str) -> None:
-        self.refresh_tokens.pop(token, None)
+        if self.refresh_tokens.pop(token, None) is not None:
+            self._save_tokens()
 
-    # ---- Clients (persisted to file) ----
+    # ---- Clients (persisted) ----
 
     def store_client(self, data: OAuthClientData) -> None:
         self.clients[data.client_id] = data
@@ -198,7 +213,49 @@ class TokenStore:
         except Exception as e:
             logger.warning(f"Failed to load clients: {e}")
 
-    # ---- Pending Logins ----
+    # ---- Tokens persistence ----
+
+    def _save_tokens(self) -> None:
+        """Persist access tokens and refresh tokens to JSON file."""
+        try:
+            data = {
+                "access_tokens": {k: asdict(v) for k, v in self.access_tokens.items()},
+                "refresh_tokens": {k: asdict(v) for k, v in self.refresh_tokens.items()},
+            }
+            TOKENS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to save tokens: {e}")
+
+    def _load_tokens(self) -> None:
+        """Load persisted tokens from JSON file, discarding expired ones."""
+        if not TOKENS_FILE.exists():
+            return
+        try:
+            data = json.loads(TOKENS_FILE.read_text(encoding="utf-8"))
+            now = time.time()
+            loaded_at = loaded_rt = 0
+
+            for k, v in data.get("access_tokens", {}).items():
+                token_data = AccessTokenData(**v)
+                if token_data.expires_at and token_data.expires_at < now:
+                    continue  # skip expired
+                self.access_tokens[k] = token_data
+                loaded_at += 1
+
+            for k, v in data.get("refresh_tokens", {}).items():
+                token_data = RefreshTokenData(**v)
+                if token_data.expires_at and token_data.expires_at < now:
+                    continue  # skip expired
+                self.refresh_tokens[k] = token_data
+                loaded_rt += 1
+
+            logger.info(
+                f"Loaded {loaded_at} access token(s) and {loaded_rt} refresh token(s) from disk"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load tokens: {e}")
+
+    # ---- Pending Logins (in-memory, short-lived) ----
 
     def store_pending_login(self, data: PendingLogin) -> None:
         self.pending_logins[data.state] = data
@@ -225,11 +282,13 @@ class TokenStore:
         return secrets.token_urlsafe(32)
 
     def cleanup_expired(self) -> None:
-        """Remove expired entries. Call periodically if needed."""
+        """Remove expired entries and persist changes."""
         now = time.time()
         self.auth_codes = {
             k: v for k, v in self.auth_codes.items() if v.expires_at > now
         }
+        old_at_count = len(self.access_tokens)
+        old_rt_count = len(self.refresh_tokens)
         self.access_tokens = {
             k: v for k, v in self.access_tokens.items()
             if not v.expires_at or v.expires_at > now
@@ -242,6 +301,9 @@ class TokenStore:
             k: v for k, v in self.pending_logins.items()
             if (now - v.created_at) < 600
         }
+        # Persist if any tokens were cleaned up
+        if len(self.access_tokens) != old_at_count or len(self.refresh_tokens) != old_rt_count:
+            self._save_tokens()
 
 
 # Global store instance
