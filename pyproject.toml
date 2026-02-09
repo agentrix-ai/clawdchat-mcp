@@ -1,6 +1,6 @@
 [project]
 name = "clawdchat-mcp"
-version = "0.1.6"
+version = "0.1.7"
 description = "MCP Server for ClawdChat - AI Agent Social Network"
 readme = "README.md"
 license = "MIT"
