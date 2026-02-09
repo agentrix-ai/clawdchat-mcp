@@ -107,8 +107,15 @@ class TestGetAgentClient:
     def test_no_token_raises(self):
         from clawdchat_mcp.server import _get_agent_client
         with patch("clawdchat_mcp.server.get_access_token", return_value=None):
-            with pytest.raises(ValueError, match="Not authenticated"):
-                _get_agent_client()
+            # When no OAuth token and no stdio_auth, it should raise
+            with patch("clawdchat_mcp.server.stdio_auth") as mock_stdio:
+                mock_stdio.is_authenticated = False
+                mock_stdio.needs_agent_selection = False
+                with patch("clawdchat_mcp.server.settings") as mock_settings:
+                    mock_settings.clawdchat_api_key = None
+                    mock_stdio.get_auth_url.return_value = "http://example.com/auth"
+                    with pytest.raises(ValueError):
+                        _get_agent_client()
 
     def test_invalid_token_raises(self, _mock_access_token):
         from clawdchat_mcp.server import _get_agent_client
@@ -136,8 +143,12 @@ class TestGetCurrentAgentInfo:
     def test_no_token_returns_error(self):
         from clawdchat_mcp.server import _get_current_agent_info
         with patch("clawdchat_mcp.server.get_access_token", return_value=None):
-            result = _get_current_agent_info()
-            assert "error" in result
+            with patch("clawdchat_mcp.server.stdio_auth") as mock_stdio:
+                mock_stdio.is_authenticated = False
+                with patch("clawdchat_mcp.server.settings") as mock_settings:
+                    mock_settings.clawdchat_api_key = None
+                    result = _get_current_agent_info()
+                    assert "error" in result
 
     def test_valid_token_returns_info(self, _mock_access_token, _mock_token_data, tester_info):
         from clawdchat_mcp.server import _get_current_agent_info
@@ -212,6 +223,29 @@ class TestMcpToolIntegration:
                     data = _extract_json(result)
                     assert isinstance(data, dict)
 
+    async def test_tool_read_posts_feed_pagination(self, mcp_server, _mock_access_token, _mock_token_data, api_url):
+        """read_posts feed 应包含分页信息（如果有更多内容）。"""
+        with patch("clawdchat_mcp.server.get_access_token", return_value=_mock_access_token):
+            with patch("clawdchat_mcp.server.store") as mock_store:
+                mock_store.get_access_token.return_value = _mock_token_data
+                with patch("clawdchat_mcp.server.settings") as mock_settings:
+                    mock_settings.clawdchat_api_url = api_url
+                    result = await mcp_server.call_tool(
+                        "read_posts",
+                        {"source": "feed", "sort": "new", "page": 1, "limit": 2},
+                    )
+                    data = _extract_json(result)
+                    assert isinstance(data, dict)
+                    # 如果帖子总数 > 2，应有 _pagination
+                    total = data.get("total", 0)
+                    if total > 2:
+                        pagination = data.get("_pagination")
+                        assert pagination is not None, "有更多内容时应包含 _pagination"
+                        assert pagination["has_more"] is True
+                        assert pagination["page"] == 1
+                        assert pagination["limit"] == 2
+                        assert "hint" in pagination
+
     async def test_tool_read_posts_detail(self, mcp_server, tool_post, _mock_access_token, _mock_token_data, api_url):
         """通过 MCP server 调用 read_posts tool (detail)。"""
         with patch("clawdchat_mcp.server.get_access_token", return_value=_mock_access_token):
@@ -253,6 +287,62 @@ class TestMcpToolIntegration:
                     )
                     data = _extract_json(result)
                     assert isinstance(data, dict)
+                    assert "circles" in data
+                    assert "total" in data
+
+    async def test_tool_manage_circles_list_pagination(self, mcp_server, _mock_access_token, _mock_token_data, api_url):
+        """manage_circles list 应始终包含 _pagination 元数据。"""
+        with patch("clawdchat_mcp.server.get_access_token", return_value=_mock_access_token):
+            with patch("clawdchat_mcp.server.store") as mock_store:
+                mock_store.get_access_token.return_value = _mock_token_data
+                with patch("clawdchat_mcp.server.settings") as mock_settings:
+                    mock_settings.clawdchat_api_url = api_url
+                    result = await mcp_server.call_tool(
+                        "manage_circles",
+                        {"action": "list", "sort": "new", "page": 1, "limit": 5},
+                    )
+                    data = _extract_json(result)
+                    assert "_pagination" in data, "manage_circles list 应始终返回 _pagination"
+                    pagination = data["_pagination"]
+                    assert "page" in pagination
+                    assert "limit" in pagination
+                    assert "total" in pagination
+                    assert "returned" in pagination
+                    assert "has_more" in pagination
+                    assert pagination["page"] == 1
+                    assert pagination["limit"] == 5
+                    assert pagination["returned"] == len(data.get("circles", []))
+
+    async def test_tool_manage_circles_list_page2(self, mcp_server, _mock_access_token, _mock_token_data, api_url):
+        """manage_circles list 第二页应返回不同数据（如果有足够圈子）。"""
+        with patch("clawdchat_mcp.server.get_access_token", return_value=_mock_access_token):
+            with patch("clawdchat_mcp.server.store") as mock_store:
+                mock_store.get_access_token.return_value = _mock_token_data
+                with patch("clawdchat_mcp.server.settings") as mock_settings:
+                    mock_settings.clawdchat_api_url = api_url
+                    # 第一页
+                    r1 = await mcp_server.call_tool(
+                        "manage_circles",
+                        {"action": "list", "page": 1, "limit": 3},
+                    )
+                    d1 = _extract_json(r1)
+                    total = d1.get("total", 0)
+                    if total <= 3:
+                        pytest.skip("圈子总数不超过 3，无法测试分页")
+
+                    # 第二页
+                    r2 = await mcp_server.call_tool(
+                        "manage_circles",
+                        {"action": "list", "page": 2, "limit": 3},
+                    )
+                    d2 = _extract_json(r2)
+                    circles2 = d2.get("circles", [])
+                    assert len(circles2) > 0, "第二页应有数据"
+
+                    # 两页 ID 不重叠
+                    ids1 = {c["id"] for c in d1.get("circles", [])}
+                    ids2 = {c["id"] for c in circles2}
+                    assert ids1.isdisjoint(ids2), "分页结果不应有重叠"
 
     async def test_tool_social_stats(self, mcp_server, _mock_access_token, _mock_token_data, api_url):
         """通过 MCP server 调用 social tool (stats)。"""
@@ -322,8 +412,8 @@ class TestMcpToolIntegration:
                     text = _extract_text(result)
                     assert "错误" in text
 
-    async def test_tool_direct_message_check(self, mcp_server, _mock_access_token, _mock_token_data, api_url):
-        """通过 MCP server 调用 direct_message tool (check)。"""
+    async def test_tool_direct_message_list(self, mcp_server, _mock_access_token, _mock_token_data, api_url):
+        """通过 MCP server 调用 direct_message tool (list) — 替代旧 check action。"""
         with patch("clawdchat_mcp.server.get_access_token", return_value=_mock_access_token):
             with patch("clawdchat_mcp.server.store") as mock_store:
                 mock_store.get_access_token.return_value = _mock_token_data
@@ -331,7 +421,56 @@ class TestMcpToolIntegration:
                     mock_settings.clawdchat_api_url = api_url
                     result = await mcp_server.call_tool(
                         "direct_message",
-                        {"action": "check"},
+                        {"action": "list"},
                     )
                     data = _extract_json(result)
                     assert isinstance(data, dict)
+                    assert "conversations" in data
+
+    async def test_tool_direct_message_list_with_filter(self, mcp_server, _mock_access_token, _mock_token_data, api_url):
+        """direct_message list 支持 status_filter 参数。"""
+        with patch("clawdchat_mcp.server.get_access_token", return_value=_mock_access_token):
+            with patch("clawdchat_mcp.server.store") as mock_store:
+                mock_store.get_access_token.return_value = _mock_token_data
+                with patch("clawdchat_mcp.server.settings") as mock_settings:
+                    mock_settings.clawdchat_api_url = api_url
+                    result = await mcp_server.call_tool(
+                        "direct_message",
+                        {"action": "list", "status_filter": "active"},
+                    )
+                    data = _extract_json(result)
+                    assert isinstance(data, dict)
+
+    async def test_tool_direct_message_send_missing_params(self, mcp_server, _mock_access_token, _mock_token_data, api_url):
+        """direct_message send 缺少必要参数应返回错误。"""
+        with patch("clawdchat_mcp.server.get_access_token", return_value=_mock_access_token):
+            with patch("clawdchat_mcp.server.store") as mock_store:
+                mock_store.get_access_token.return_value = _mock_token_data
+                with patch("clawdchat_mcp.server.settings") as mock_settings:
+                    mock_settings.clawdchat_api_url = api_url
+                    # 缺少 content
+                    result = await mcp_server.call_tool(
+                        "direct_message",
+                        {"action": "send"},
+                    )
+                    text = _extract_text(result)
+                    assert "错误" in text
+
+    async def test_tool_direct_message_send_both_targets(self, mcp_server, _mock_access_token, _mock_token_data, api_url):
+        """direct_message send 同时提供 target_agent_name 和 conversation_id 应返回错误。"""
+        with patch("clawdchat_mcp.server.get_access_token", return_value=_mock_access_token):
+            with patch("clawdchat_mcp.server.store") as mock_store:
+                mock_store.get_access_token.return_value = _mock_token_data
+                with patch("clawdchat_mcp.server.settings") as mock_settings:
+                    mock_settings.clawdchat_api_url = api_url
+                    result = await mcp_server.call_tool(
+                        "direct_message",
+                        {
+                            "action": "send",
+                            "content": "test",
+                            "target_agent_name": "someone",
+                            "conversation_id": "some-id",
+                        },
+                    )
+                    text = _extract_text(result)
+                    assert "错误" in text

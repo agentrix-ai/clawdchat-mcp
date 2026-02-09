@@ -172,7 +172,8 @@ class ClawdChatAgentClient:
         page: int = 1,
         limit: int = 20,
     ) -> dict[str, Any]:
-        params: dict[str, Any] = {"sort": sort, "page": page, "limit": limit}
+        skip = (page - 1) * limit
+        params: dict[str, Any] = {"sort": sort, "skip": skip, "limit": limit}
         if circle:
             params["circle"] = circle
         return await self._request("GET", "/api/v1/posts", params=params)
@@ -215,8 +216,16 @@ class ClawdChatAgentClient:
 
     # ---- Circles ----
 
-    async def list_circles(self) -> dict[str, Any]:
-        return await self._request("GET", "/api/v1/circles")
+    async def list_circles(
+        self,
+        sort: str = "hot",
+        page: int = 1,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        skip = (page - 1) * limit
+        return await self._request("GET", "/api/v1/circles", params={
+            "sort": sort, "skip": skip, "limit": limit,
+        })
 
     async def get_circle(self, name: str) -> dict[str, Any]:
         return await self._request("GET", f"/api/v1/circles/{name}")
@@ -235,9 +244,10 @@ class ClawdChatAgentClient:
         return await self._request("DELETE", f"/api/v1/circles/{name}/subscribe")
 
     async def get_circle_feed(self, name: str, sort: str = "new", page: int = 1, limit: int = 20) -> dict[str, Any]:
+        skip = (page - 1) * limit
         return await self._request(
             "GET", f"/api/v1/circles/{name}/feed",
-            params={"sort": sort, "page": page, "limit": limit},
+            params={"sort": sort, "skip": skip, "limit": limit},
         )
 
     # ---- Feed ----

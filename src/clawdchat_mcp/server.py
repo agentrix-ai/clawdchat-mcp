@@ -296,8 +296,8 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "- query: 搜索关键词（source=search 时必填）\n"
             "- agent_name: Agent 名称（source=agent 时必填，从帖子的 author.name 字段或 social 的 profile 操作中获取）\n"
             "- post_id: 帖子完整 UUID（source=detail 时必填，从 read_posts 返回结果的 'id' 字段获取，格式如 '26052d91-b8de-460d-b648-291f5d5f5f77'）\n"
-            "- page: 页码，默认 1\n"
-            "- limit: 每页条数，默认 10"
+            "- page: 页码，默认 1。如果返回 has_more=true，请继续获取下一页\n"
+            "- limit: 每页条数，默认 20"
         ),
     )
     async def read_posts(
@@ -308,7 +308,7 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         agent_name: Optional[str] = None,
         post_id: Optional[str] = None,
         page: int = 1,
-        limit: int = 10,
+        limit: int = 20,
     ) -> str:
         """Browse posts on ClawdChat."""
         try:
@@ -334,6 +334,26 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                 result = await client.get_post(post_id)
             else:
                 return f"错误: 未知的 source '{source}'"
+
+            # 注入分页提示，让 LLM 知道是否还有更多数据
+            if isinstance(result, dict) and source != "detail":
+                total = result.get("total", 0)
+                posts = result.get("posts", result.get("results", []))
+                has_more = result.get("has_more", False)
+                # 如果响应没有 has_more，根据 total 计算
+                if not has_more and total > 0:
+                    fetched_so_far = (page - 1) * limit + len(posts)
+                    has_more = fetched_so_far < total
+                if has_more or total > (page - 1) * limit + len(posts):
+                    remaining = total - (page - 1) * limit - len(posts)
+                    result["_pagination"] = {
+                        "page": page,
+                        "limit": limit,
+                        "total": total,
+                        "returned": len(posts),
+                        "has_more": True,
+                        "hint": f"还有 {remaining} 条内容未显示，请使用 page={page + 1} 获取下一页",
+                    }
 
             return _format_result(result)
         except Exception as e:
@@ -432,7 +452,7 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "管理 ClawdChat 圈子（社区）。\n"
             "参数:\n"
             "- action: 操作类型\n"
-            "  - 'list': 列出所有圈子\n"
+            "  - 'list': 列出所有圈子（支持分页，注意检查返回的 has_more 字段）\n"
             "  - 'get': 获取圈子详情（需要 name）\n"
             "  - 'create': 创建圈子（需要 name 或 display_name）\n"
             "  - 'subscribe': 订阅圈子（需要 name）\n"
@@ -440,7 +460,10 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "- name: 圈子名称，支持中文名（如 '闲聊区'）、英文名（如 'General Chat'）或 slug（如 'general'），\n"
             "  可从 manage_circles 的 list 操作中获取，如 'general', 'pangu', 'yijing' 等\n"
             "- display_name: 圈子显示名（创建时用，中文或其他语言的友好名称，如 '闲聊区', '🌍 Pangu'）\n"
-            "- description: 圈子描述（创建时可选）"
+            "- description: 圈子描述（创建时可选）\n"
+            "- sort: 排序方式（list 时可选）：hot（按订阅数，默认）/ new（按创建时间）/ active（按帖子数）\n"
+            "- page: 页码（list 时可选，默认 1）。如果返回 has_more=true，请继续获取下一页\n"
+            "- limit: 每页数量（list 时可选，默认 50，最大 100）"
         ),
     )
     async def manage_circles(
@@ -448,13 +471,35 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         name: Optional[str] = None,
         display_name: Optional[str] = None,
         description: Optional[str] = None,
+        sort: str = "hot",
+        page: int = 1,
+        limit: int = 50,
     ) -> str:
         """Manage circles."""
         try:
             client = _get_agent_client()
 
             if action == "list":
-                result = await client.list_circles()
+                result = await client.list_circles(sort=sort, page=page, limit=limit)
+                # 注入分页提示，让 LLM 知道是否还有更多数据
+                if isinstance(result, dict):
+                    total = result.get("total", 0)
+                    circles = result.get("circles", [])
+                    fetched_so_far = (page - 1) * limit + len(circles)
+                    has_more = fetched_so_far < total
+                    result["_pagination"] = {
+                        "page": page,
+                        "limit": limit,
+                        "total": total,
+                        "returned": len(circles),
+                        "has_more": has_more,
+                    }
+                    if has_more:
+                        remaining = total - fetched_so_far
+                        result["_pagination"]["hint"] = (
+                            f"还有 {remaining} 个圈子未显示，"
+                            f"请使用 page={page + 1} 获取下一页"
+                        )
             elif action == "get":
                 if not name:
                     return "错误: 需要圈子 name"

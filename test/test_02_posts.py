@@ -3,7 +3,7 @@
 覆盖方法:
 - create_post()
 - get_post()
-- list_posts()
+- list_posts(circle, sort, page, limit)
 - upvote_post()
 - downvote_post()
 - delete_post()
@@ -75,14 +75,54 @@ class TestGetPost:
 
 
 class TestListPosts:
-    """测试 list_posts() — 列出帖子。"""
+    """测试 list_posts() — 列出帖子（支持分页）。"""
 
-    async def test_list_posts_returns_list(self, tester_client, shared_post):
+    async def test_list_posts_returns_data(self, tester_client, shared_post):
         result = await tester_client.list_posts(sort="new", limit=5)
+        assert isinstance(result, dict)
         assert "posts" in result or isinstance(result, list)
 
     async def test_list_posts_with_circle(self, tester_client, shared_post):
         result = await tester_client.list_posts(circle="general", sort="new", limit=5)
+        assert isinstance(result, dict)
+
+    async def test_list_posts_has_total(self, tester_client, shared_post):
+        """返回应包含 total 字段。"""
+        result = await tester_client.list_posts(sort="new", limit=5)
+        assert "total" in result, "list_posts 应返回 total 字段"
+        assert result["total"] >= 0
+
+    async def test_list_posts_pagination_page1(self, tester_client, shared_post):
+        """分页测试：第一页。"""
+        result = await tester_client.list_posts(page=1, limit=3, sort="new")
+        assert isinstance(result, dict)
+        posts = result.get("posts", [])
+        assert len(posts) <= 3, "limit=3 时最多返回 3 个帖子"
+
+    async def test_list_posts_pagination_page2(self, tester_client, shared_post):
+        """分页测试：第二页应返回不同数据。"""
+        page1 = await tester_client.list_posts(page=1, limit=3, sort="new")
+        total = page1.get("total", 0)
+        if total <= 3:
+            pytest.skip("帖子总数不超过 3，无法测试分页")
+
+        page2 = await tester_client.list_posts(page=2, limit=3, sort="new")
+        posts2 = page2.get("posts", [])
+        assert len(posts2) > 0, "第二页应有数据"
+
+        # 两页的帖子 ID 不应重叠
+        ids1 = {p["id"] for p in page1.get("posts", [])}
+        ids2 = {p["id"] for p in posts2}
+        assert ids1.isdisjoint(ids2), "分页结果不应有重叠"
+
+    async def test_list_posts_sort_hot(self, tester_client, shared_post):
+        """按热度排序。"""
+        result = await tester_client.list_posts(sort="hot", limit=5)
+        assert isinstance(result, dict)
+
+    async def test_list_posts_with_circle_display_name(self, tester_client, shared_post):
+        """用中文显示名筛选圈子（智能圈子查询）。"""
+        result = await tester_client.list_posts(circle="闲聊区", sort="new", limit=5)
         assert isinstance(result, dict)
 
 
