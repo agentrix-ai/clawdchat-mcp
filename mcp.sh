@@ -1,243 +1,525 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# ClawdChat MCP Server 部署脚本
+#
+# 用法:
+#   ./deploy.sh deploy    # 完整部署（拉代码 + 装依赖 + 重启）
+#   ./deploy.sh start     # 启动服务
+#   ./deploy.sh stop      # 停止服务
+#   ./deploy.sh restart   # 重启服务
+#   ./deploy.sh status    # 查看状态
+#   ./deploy.sh logs      # 查看日志
+#   ./deploy.sh health    # 健康检查
+#
+set -euo pipefail
 
-# ClawdChat MCP Server - 统一管理脚本
-# 用法: ./mcp.sh {start|stop|status|restart} [mode]
+# ============================================================
+# 配置
+# ============================================================
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG_DIR="${PROJECT_DIR}/logs"
+LOG_FILE="${LOG_DIR}/mcp-server.log"
+PID_FILE="${PROJECT_DIR}/.mcp-server.pid"
+ENV_FILE="${PROJECT_DIR}/.env"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# 颜色输出
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
 
-PID_FILE=".mcp-server.pid"
-LOG_DIR="logs"
-LOG_FILE="$LOG_DIR/server.log"
-ERROR_LOG="$LOG_DIR/error.log"
+log_info()  { echo -e "${GREEN}[INFO]${NC}  $(date '+%H:%M:%S') $*"; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $(date '+%H:%M:%S') $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $(date '+%H:%M:%S') $*"; }
+log_step()  { echo -e "${BLUE}[STEP]${NC}  $(date '+%H:%M:%S') $*"; }
 
-# ==================== 启动服务 ====================
-start_server() {
-    local TRANSPORT_MODE="${1:-streamable-http}"
-    
-    mkdir -p "$LOG_DIR"
-    
-    # 检查是否已经在运行
-    if [ -f "$PID_FILE" ]; then
-        local OLD_PID=$(cat "$PID_FILE")
-        if ps -p "$OLD_PID" > /dev/null 2>&1; then
-            echo "❌ MCP Server 已经在运行 (PID: $OLD_PID)"
-            echo "如需重启，请运行: $0 restart"
-            return 1
+# ============================================================
+# 从 .env 读取端口和 Host
+# ============================================================
+load_env() {
+    if [[ ! -f "$ENV_FILE" ]]; then
+        log_error ".env 文件不存在: $ENV_FILE"
+        exit 1
+    fi
+
+    # 读取端口（优先环境变量，其次 .env，默认 8000）
+    MCP_PORT=$(grep -E '^MCP_SERVER_PORT=' "$ENV_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]')
+    MCP_PORT="${MCP_PORT:-8000}"
+
+    MCP_HOST=$(grep -E '^MCP_SERVER_HOST=' "$ENV_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]')
+    MCP_HOST="${MCP_HOST:-127.0.0.1}"
+
+    MCP_URL=$(grep -E '^MCP_SERVER_URL=' "$ENV_FILE" 2>/dev/null | cut -d'=' -f2 | tr -d '[:space:]')
+    MCP_URL="${MCP_URL:-http://localhost:${MCP_PORT}}"
+
+    log_info "配置: HOST=${MCP_HOST}, PORT=${MCP_PORT}, URL=${MCP_URL}"
+}
+
+# ============================================================
+# 前置检查
+# ============================================================
+check_prerequisites() {
+    log_step "检查前置依赖..."
+
+    # 检查 uv
+    if ! command -v uv &>/dev/null; then
+        log_error "未安装 uv，请先安装: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        exit 1
+    fi
+    log_info "uv 版本: $(uv --version)"
+
+    # 检查 git
+    if ! command -v git &>/dev/null; then
+        log_error "未安装 git"
+        exit 1
+    fi
+
+    # 检查 Python 版本
+    local py_version
+    py_version=$(uv run python --version 2>/dev/null || echo "unknown")
+    log_info "Python 版本: ${py_version}"
+
+    # 检查 .env
+    if [[ ! -f "$ENV_FILE" ]]; then
+        if [[ -f "${PROJECT_DIR}/.env.example" ]]; then
+            log_warn ".env 不存在，从 .env.example 创建..."
+            cp "${PROJECT_DIR}/.env.example" "$ENV_FILE"
         else
-            echo "⚠️  发现过期的 PID 文件，清理中..."
-            rm -f "$PID_FILE"
+            log_error ".env 文件不存在，请创建"
+            exit 1
         fi
     fi
-    
-    echo "🚀 启动 ClawdChat MCP Server (模式: $TRANSPORT_MODE)..."
-    
-    # 后台启动服务（stdout 和 stderr 都输出到同一个日志文件）
-    if [ "$TRANSPORT_MODE" = "stdio" ]; then
-        nohup uv run python main.py >> "$LOG_FILE" 2>&1 &
-    else
-        nohup uv run python main.py --transport streamable-http >> "$LOG_FILE" 2>&1 &
-    fi
-    
-    local SERVER_PID=$!
-    echo $SERVER_PID > "$PID_FILE"
-    
-    sleep 2
-    
-    # 检查服务是否成功启动
-    if ps -p "$SERVER_PID" > /dev/null 2>&1; then
-        echo "✅ MCP Server 启动成功!"
-        echo "   PID: $SERVER_PID"
-        echo "   模式: $TRANSPORT_MODE"
-        echo "   日志文件: $LOG_FILE"
-        echo ""
-        echo "📝 查看日志: tail -f $LOG_FILE"
-        echo "🛑 停止服务: $0 stop"
-        echo "📊 查看状态: $0 status"
-    else
-        echo "❌ 服务启动失败，请查看日志: $LOG_FILE"
-        rm -f "$PID_FILE"
-        return 1
+
+    log_info "前置检查通过"
+}
+
+# ============================================================
+# 获取占用端口的进程
+# ============================================================
+get_port_pids() {
+    local port=$1
+    # 获取监听指定端口的进程 PID（排除 header 行）
+    lsof -ti ":${port}" 2>/dev/null || true
+}
+
+# 获取 PID 文件中记录的进程
+get_saved_pid() {
+    if [[ -f "$PID_FILE" ]]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            echo "$pid"
+        fi
     fi
 }
 
-# ==================== 停止服务 ====================
-stop_server() {
-    if [ ! -f "$PID_FILE" ]; then
-        echo "⚠️  未找到运行中的 MCP Server"
+# ============================================================
+# 检查端口冲突
+# ============================================================
+check_port() {
+    log_step "检查端口 ${MCP_PORT} 占用情况..."
+
+    local pids
+    pids=$(get_port_pids "$MCP_PORT")
+
+    if [[ -z "$pids" ]]; then
+        log_info "端口 ${MCP_PORT} 空闲"
         return 0
     fi
-    
-    local PID=$(cat "$PID_FILE")
-    
-    if ! ps -p "$PID" > /dev/null 2>&1; then
-        echo "⚠️  进程 $PID 不存在，清理 PID 文件..."
-        rm -f "$PID_FILE"
+
+    log_warn "端口 ${MCP_PORT} 被以下进程占用:"
+    for pid in $pids; do
+        local proc_info
+        proc_info=$(ps -p "$pid" -o pid,user,command --no-headers 2>/dev/null || echo "$pid (信息获取失败)")
+        echo "  PID: ${proc_info}"
+    done
+
+    return 1
+}
+
+# ============================================================
+# 停止服务
+# ============================================================
+do_stop() {
+    log_step "停止 MCP Server..."
+
+    local stopped=false
+
+    # 1. 先尝试通过 PID 文件停止
+    local saved_pid
+    saved_pid=$(get_saved_pid)
+    if [[ -n "$saved_pid" ]]; then
+        log_info "通过 PID 文件停止进程: ${saved_pid}"
+        kill "$saved_pid" 2>/dev/null || true
+        stopped=true
+    fi
+
+    # 2. 再检查端口占用并清理
+    local pids
+    pids=$(get_port_pids "$MCP_PORT")
+    if [[ -n "$pids" ]]; then
+        for pid in $pids; do
+            log_info "终止端口 ${MCP_PORT} 上的进程: ${pid}"
+            kill "$pid" 2>/dev/null || true
+            stopped=true
+        done
+    fi
+
+    if [[ "$stopped" == "true" ]]; then
+        # 等待进程退出
+        log_info "等待进程退出..."
+        local wait_count=0
+        while [[ $wait_count -lt 10 ]]; do
+            pids=$(get_port_pids "$MCP_PORT")
+            if [[ -z "$pids" ]]; then
+                break
+            fi
+            sleep 1
+            ((wait_count++))
+        done
+
+        # 如果还未退出，强制 kill
+        pids=$(get_port_pids "$MCP_PORT")
+        if [[ -n "$pids" ]]; then
+            log_warn "进程未响应 SIGTERM，发送 SIGKILL..."
+            for pid in $pids; do
+                kill -9 "$pid" 2>/dev/null || true
+            done
+            sleep 1
+        fi
+    fi
+
+    # 清理 PID 文件
+    rm -f "$PID_FILE"
+
+    # 最终确认
+    pids=$(get_port_pids "$MCP_PORT")
+    if [[ -n "$pids" ]]; then
+        log_error "端口 ${MCP_PORT} 仍被占用，无法停止"
+        return 1
+    fi
+
+    log_info "MCP Server 已停止"
+}
+
+# ============================================================
+# 拉取最新代码
+# ============================================================
+do_pull() {
+    log_step "拉取最新代码..."
+
+    cd "$PROJECT_DIR"
+
+    # 检查是否为 git 仓库
+    if [[ ! -d ".git" ]]; then
+        log_warn "不是 git 仓库，跳过代码拉取"
         return 0
     fi
-    
-    echo "🛑 正在停止 MCP Server (PID: $PID)..."
-    
-    # 尝试优雅关闭
-    kill "$PID"
-    
-    # 等待进程结束
-    for i in {1..10}; do
-        if ! ps -p "$PID" > /dev/null 2>&1; then
-            echo "✅ MCP Server 已停止"
-            rm -f "$PID_FILE"
+
+    # 检查是否有未提交的更改
+    if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+        log_warn "检测到未提交的更改:"
+        git status --short
+        echo ""
+        read -rp "是否继续拉取？本地修改会被保留 (y/N): " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+            log_info "跳过代码拉取"
             return 0
         fi
-        sleep 1
-    done
-    
-    # 如果还没停止，强制杀掉
-    echo "⚠️  优雅关闭超时，强制停止..."
-    kill -9 "$PID" 2>/dev/null
-    
-    sleep 1
-    
-    if ! ps -p "$PID" > /dev/null 2>&1; then
-        echo "✅ MCP Server 已强制停止"
-        rm -f "$PID_FILE"
-    else
-        echo "❌ 无法停止进程 $PID"
-        return 1
     fi
+
+    # 拉取代码
+    local current_branch
+    current_branch=$(git branch --show-current)
+    log_info "当前分支: ${current_branch}"
+
+    git pull origin "$current_branch" --rebase 2>&1 | while IFS= read -r line; do
+        echo "  ${line}"
+    done
+
+    local new_commit
+    new_commit=$(git log -1 --format='%h %s' 2>/dev/null)
+    log_info "最新提交: ${new_commit}"
 }
 
-# ==================== 查看状态 ====================
-show_status() {
-    echo "================================================"
-    echo "  ClawdChat MCP Server 状态"
-    echo "================================================"
-    echo ""
-    
-    if [ ! -f "$PID_FILE" ]; then
-        echo "状态: ⚫ 未运行"
-        echo ""
-        echo "💡 启动服务: $0 start [stdio|streamable-http]"
+# ============================================================
+# 安装依赖
+# ============================================================
+do_install() {
+    log_step "安装/同步依赖..."
+
+    cd "$PROJECT_DIR"
+    uv sync 2>&1 | while IFS= read -r line; do
+        echo "  ${line}"
+    done
+
+    log_info "依赖安装完成"
+}
+
+# ============================================================
+# 启动服务
+# ============================================================
+do_start() {
+    log_step "启动 MCP Server..."
+
+    # 检查端口是否已被占用
+    if ! check_port; then
+        log_error "端口 ${MCP_PORT} 已被占用，请先执行 stop"
+        return 1
+    fi
+
+    # 创建日志目录
+    mkdir -p "$LOG_DIR"
+
+    cd "$PROJECT_DIR"
+
+    # 使用 nohup 后台启动
+    nohup uv run clawdchat-mcp --transport streamable-http >> "$LOG_FILE" 2>&1 &
+    local pid=$!
+    echo "$pid" > "$PID_FILE"
+
+    log_info "MCP Server 启动中 (PID: ${pid})..."
+
+    # 等待启动并检查健康
+    local wait_count=0
+    local started=false
+    while [[ $wait_count -lt 15 ]]; do
+        sleep 1
+        ((wait_count++))
+
+        # 检查进程是否还活着
+        if ! kill -0 "$pid" 2>/dev/null; then
+            log_error "进程已退出，启动失败！最近日志:"
+            tail -20 "$LOG_FILE" 2>/dev/null | while IFS= read -r line; do
+                echo "  ${line}"
+            done
+            rm -f "$PID_FILE"
+            return 1
+        fi
+
+        # 检查端口是否已监听
+        if lsof -ti ":${MCP_PORT}" &>/dev/null; then
+            started=true
+            break
+        fi
+    done
+
+    if [[ "$started" != "true" ]]; then
+        log_warn "服务启动较慢，15 秒内端口仍未监听，但进程仍在运行 (PID: ${pid})"
+        log_warn "请稍后手动检查: ./deploy.sh status"
         return 0
     fi
-    
-    local PID=$(cat "$PID_FILE")
-    
-    if ! ps -p "$PID" > /dev/null 2>&1; then
-        echo "状态: ⚠️  异常 (PID 文件存在但进程不存在)"
-        echo "PID 文件: $PID"
-        echo ""
-        echo "💡 清理并重启: $0 stop && $0 start"
+
+    log_info "MCP Server 启动成功！"
+    echo ""
+    echo "  PID:   ${pid}"
+    echo "  地址:  http://${MCP_HOST}:${MCP_PORT}"
+    echo "  端点:  ${MCP_URL}/mcp"
+    echo "  日志:  ${LOG_FILE}"
+    echo ""
+}
+
+# ============================================================
+# 查看状态
+# ============================================================
+do_status() {
+    echo ""
+    echo "========================================="
+    echo "  ClawdChat MCP Server 状态"
+    echo "========================================="
+
+    # PID 文件状态
+    local saved_pid
+    saved_pid=$(get_saved_pid)
+    if [[ -n "$saved_pid" ]]; then
+        echo -e "  PID 文件:  ${GREEN}${saved_pid} (运行中)${NC}"
+        ps -p "$saved_pid" -o pid,user,%cpu,%mem,etime,command --no-headers 2>/dev/null | while IFS= read -r line; do
+            echo "  进程信息:  ${line}"
+        done
+    else
+        echo -e "  PID 文件:  ${RED}无运行中的进程${NC}"
+    fi
+
+    # 端口状态
+    local pids
+    pids=$(get_port_pids "$MCP_PORT")
+    if [[ -n "$pids" ]]; then
+        echo -e "  端口 ${MCP_PORT}: ${GREEN}已监听${NC}"
+    else
+        echo -e "  端口 ${MCP_PORT}: ${RED}未监听${NC}"
+    fi
+
+    # 配置信息
+    echo "  配置:"
+    echo "    HOST: ${MCP_HOST}"
+    echo "    PORT: ${MCP_PORT}"
+    echo "    URL:  ${MCP_URL}"
+
+    # 日志文件
+    if [[ -f "$LOG_FILE" ]]; then
+        local log_size
+        log_size=$(du -sh "$LOG_FILE" 2>/dev/null | cut -f1)
+        echo "  日志文件: ${LOG_FILE} (${log_size})"
+    fi
+
+    echo "========================================="
+    echo ""
+}
+
+# ============================================================
+# 查看日志
+# ============================================================
+do_logs() {
+    local lines="${1:-50}"
+
+    if [[ ! -f "$LOG_FILE" ]]; then
+        log_warn "日志文件不存在: ${LOG_FILE}"
+        return 0
+    fi
+
+    log_info "最近 ${lines} 行日志 (${LOG_FILE}):"
+    echo "---"
+    tail -n "$lines" "$LOG_FILE"
+    echo "---"
+}
+
+# ============================================================
+# 健康检查
+# ============================================================
+do_health() {
+    log_step "执行健康检查..."
+
+    # 1. 进程检查
+    local saved_pid
+    saved_pid=$(get_saved_pid)
+    if [[ -z "$saved_pid" ]]; then
+        log_error "进程未运行"
         return 1
     fi
-    
-    # 获取进程信息
-    local PROCESS_INFO=$(ps -p "$PID" -o pid,ppid,etime,rss,cmd --no-headers)
-    local MEMORY=$(echo "$PROCESS_INFO" | awk '{print $4}')
-    local MEMORY_MB=$((MEMORY / 1024))
-    local UPTIME=$(echo "$PROCESS_INFO" | awk '{print $3}')
-    
-    echo "状态: 🟢 运行中"
-    echo "PID: $PID"
-    echo "运行时间: $UPTIME"
-    echo "内存占用: ${MEMORY_MB} MB"
-    echo ""
-    echo "进程详情:"
-    echo "$PROCESS_INFO"
-    echo ""
-    
-    # 日志文件信息
-    if [ -f "$LOG_FILE" ]; then
-        local LOG_SIZE=$(du -h "$LOG_FILE" | cut -f1)
-        local LOG_LINES=$(wc -l < "$LOG_FILE")
-        echo "日志文件: $LOG_FILE"
-        echo "  大小: $LOG_SIZE"
-        echo "  行数: $LOG_LINES"
-        
-        # 显示最后几行日志
-        if [ "$LOG_LINES" -gt 0 ]; then
-            echo ""
-            echo "📋 最近的日志 (最后 5 行):"
-            echo "---"
-            tail -n 5 "$LOG_FILE"
-        fi
-        echo ""
+    log_info "进程运行中 (PID: ${saved_pid})"
+
+    # 2. 端口检查
+    if ! lsof -ti ":${MCP_PORT}" &>/dev/null; then
+        log_error "端口 ${MCP_PORT} 未监听"
+        return 1
     fi
-    
-    echo "================================================"
-    echo "📝 查看实时日志: tail -f $LOG_FILE"
-    echo "🛑 停止服务: $0 stop"
-    echo "🔄 重启服务: $0 restart"
-    echo "================================================"
-}
+    log_info "端口 ${MCP_PORT} 正常监听"
 
-# ==================== 重启服务 ====================
-restart_server() {
-    echo "🔄 重启 MCP Server..."
+    # 3. HTTP 检查（OAuth metadata 端点不需要认证）
+    local http_code
+    http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+        --max-time 5 \
+        "http://${MCP_HOST}:${MCP_PORT}/.well-known/oauth-authorization-server" 2>/dev/null || echo "000")
+
+    if [[ "$http_code" == "200" ]]; then
+        log_info "HTTP 健康检查通过 (OAuth metadata: 200)"
+    elif [[ "$http_code" == "000" ]]; then
+        log_warn "HTTP 连接失败（可能服务仍在启动中，或被防火墙阻止）"
+    else
+        log_warn "HTTP 返回 ${http_code}（非 200，但服务可能正常）"
+    fi
+
+    # 4. MCP 端点检查
+    http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+        --max-time 5 \
+        "http://${MCP_HOST}:${MCP_PORT}/mcp" 2>/dev/null || echo "000")
+
+    if [[ "$http_code" == "401" ]]; then
+        log_info "MCP 端点正常 (返回 401 需认证，符合预期)"
+    elif [[ "$http_code" == "000" ]]; then
+        log_warn "MCP 端点连接失败"
+    else
+        log_info "MCP 端点返回: ${http_code}"
+    fi
+
     echo ""
-    stop_server
-    sleep 1
-    start_server "$@"
+    log_info "健康检查完成"
 }
 
-# ==================== 显示帮助 ====================
-show_help() {
-    cat << EOF
-ClawdChat MCP Server 管理工具
+# ============================================================
+# 完整部署流程
+# ============================================================
+do_deploy() {
+    echo ""
+    echo "========================================="
+    echo "  ClawdChat MCP Server 部署"
+    echo "  $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "========================================="
+    echo ""
 
-用法:
-    $0 <command> [options]
+    check_prerequisites
+    echo ""
 
-命令:
-    start [mode]    启动服务（后台运行）
-                    mode: stdio | streamable-http (默认: streamable-http)
-    
-    stop            停止服务
-    
-    status          查看服务状态
-    
-    restart [mode]  重启服务
-                    mode: stdio | streamable-http (默认: streamable-http)
-    
-    help            显示此帮助信息
+    do_stop
+    echo ""
 
-示例:
-    $0 start                    # 启动服务 (HTTP 模式)
-    $0 start stdio              # 启动服务 (stdio 模式)
-    $0 stop                     # 停止服务
-    $0 status                   # 查看状态
-    $0 restart                  # 重启服务
-    
-    tail -f logs/server.log     # 查看实时日志
+    do_pull
+    echo ""
 
-EOF
+    do_install
+    echo ""
+
+    do_start
+    echo ""
+
+    do_health
+    echo ""
+
+    echo "========================================="
+    echo -e "  ${GREEN}部署完成！${NC}"
+    echo "========================================="
+    echo ""
 }
 
-# ==================== 主函数 ====================
+# ============================================================
+# 主入口
+# ============================================================
 main() {
-    local COMMAND="${1:-help}"
-    shift || true
-    
-    case "$COMMAND" in
+    cd "$PROJECT_DIR"
+    load_env
+
+    local action="${1:-help}"
+
+    case "$action" in
+        deploy)
+            do_deploy
+            ;;
         start)
-            start_server "$@"
+            do_start
             ;;
         stop)
-            stop_server
-            ;;
-        status)
-            show_status
+            do_stop
             ;;
         restart)
-            restart_server "$@"
+            do_stop
+            echo ""
+            do_start
             ;;
-        help|--help|-h)
-            show_help
+        status)
+            do_status
+            ;;
+        logs)
+            do_logs "${2:-50}"
+            ;;
+        health)
+            do_health
             ;;
         *)
-            echo "❌ 未知命令: $COMMAND"
             echo ""
-            show_help
-            exit 1
+            echo "ClawdChat MCP Server 部署脚本"
+            echo ""
+            echo "用法: $0 <command>"
+            echo ""
+            echo "Commands:"
+            echo "  deploy    完整部署（拉代码 + 装依赖 + 重启）"
+            echo "  start     启动服务"
+            echo "  stop      停止服务"
+            echo "  restart   重启服务（stop + start）"
+            echo "  status    查看运行状态"
+            echo "  logs [n]  查看最近 n 行日志（默认 50）"
+            echo "  health    健康检查"
+            echo ""
             ;;
     esac
 }
