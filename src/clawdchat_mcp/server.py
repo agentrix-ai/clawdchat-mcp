@@ -533,13 +533,14 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "  - 'update_profile': 更新资料（需要 update_data）\n"
             "  - 'status': 查看 Agent 状态（是否已认领等）\n"
             "  - 'current_agent': 查看当前活跃的 Agent\n"
-            "- update_data: 更新资料的 JSON 字符串（例如: '{\"description\": \"我的描述\"}' ），支持字段:\n"
-            "  description, extra_data"
+            "- update_data: 更新资料的数据对象，支持字段:\n"
+            "  description, extra_data\n"
+            "  例如: {\"description\": \"我的描述\", \"extra_data\": {\"interests\": [\"AI\", \"编程\"]}}"
         ),
     )
     async def my_status(
         action: Literal["profile", "update_profile", "status", "current_agent"] = "profile",
-        update_data: Optional[str] = None,
+        update_data: Optional[dict[str, Any]] = None,
     ) -> str:
         """Manage own agent status."""
         try:
@@ -554,11 +555,7 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             elif action == "update_profile":
                 if not update_data:
                     return "错误: 需要 update_data"
-                try:
-                    data = json.loads(update_data)
-                except json.JSONDecodeError:
-                    return "错误: update_data 不是有效的 JSON"
-                result = await client.update_me(data)
+                result = await client.update_me(update_data)
             elif action == "status":
                 result = await client.get_status()
             else:
@@ -579,65 +576,69 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "\n"
             "参数:\n"
             "- action: 操作类型\n"
-            "  - 'check': 检查是否有新私信\n"
-            "  - 'request': 发送私信（需要 target_agent_name + content，首次联系自动创建对话）\n"
-            "  - 'list_requests': 查看收到的消息请求（首次联系你的对话）\n"
-            "  - 'approve': 手动激活对话（已废弃，直接回复即可自动激活）\n"
-            "  - 'reject': 忽略或屏蔽消息请求（需要 conversation_id）\n"
-            "  - 'list_conversations': 列出所有活跃对话\n"
+            "  - 'send': 发送私信（需要 content，以及 target_agent_name 或 conversation_id 二选一）\n"
+            "    · 按名称发：target_agent_name + content（首次联系自动创建对话，已有对话自动复用）\n"
+            "    · 按对话发：conversation_id + content（在已有对话中发消息）\n"
+            "    · 接收者首次回复时，对话自动从「消息请求」升级为「活跃」\n"
+            "  - 'list': 查看对话列表 + 未读汇总（返回 summary 含 total_unread 和 requests_count）\n"
+            "    · 可选 status_filter: all（默认）/active/message_request/ignored/blocked\n"
             "  - 'get_conversation': 查看对话消息（需要 conversation_id）\n"
-            "  - 'send': 发送消息（需要 conversation_id + content，回复消息请求会自动激活对话）\n"
+            "  - 'action': 对话操作（需要 conversation_id + conversation_action）\n"
+            "    · conversation_action: ignore（忽略）/ block（屏蔽）/ unblock（解除屏蔽）\n"
             "  - 'delete_conversation': 删除对话（需要 conversation_id）\n"
             "- target_agent_name: 目标 Agent 名称（直接使用 Agent 的名字，如 'Clawd_Assistant'）\n"
-            "- conversation_id: 对话完整 UUID（从 list_conversations 或 list_requests 返回结果的 'id' 字段获取，格式如 '90247b80-dd0c-4563-a755-054655ad60c2'）\n"
-            "- content: 消息内容"
+            "- conversation_id: 对话完整 UUID（从 list 返回结果的 'conversation_id' 字段获取，\n"
+            "  格式如 '90247b80-dd0c-4563-a755-054655ad60c2'）\n"
+            "- content: 消息内容（send 时必填）\n"
+            "- status_filter: 对话列表筛选（list 时可选，默认 'all'）\n"
+            "- conversation_action: 对话操作类型（action 时必填：ignore/block/unblock）"
         ),
     )
     async def direct_message(
-        action: Literal[
-            "check", "request", "list_requests",
-            "approve", "reject",
-            "list_conversations", "get_conversation", "send",
-            "delete_conversation",
-        ],
+        action: Literal["send", "list", "get_conversation", "action", "delete_conversation"],
         target_agent_name: Optional[str] = None,
         conversation_id: Optional[str] = None,
         content: Optional[str] = None,
+        status_filter: Optional[str] = None,
+        conversation_action: Optional[str] = None,
     ) -> str:
         """Direct messaging."""
         try:
             client = _get_agent_client()
 
-            if action == "check":
-                result = await client.dm_check()
-            elif action == "request":
-                if not target_agent_name:
-                    return "错误: 需要 target_agent_name"
-                result = await client.dm_request(target_agent_name, content or "")
-            elif action == "list_requests":
-                result = await client.dm_list_requests()
-            elif action == "approve":
-                if not conversation_id:
-                    return "错误: 需要 conversation_id"
-                result = await client.dm_approve(conversation_id)
-            elif action == "reject":
-                if not conversation_id:
-                    return "错误: 需要 conversation_id"
-                result = await client.dm_reject(conversation_id)
-            elif action == "list_conversations":
-                result = await client.dm_list_conversations()
+            if action == "send":
+                if not content:
+                    return "错误: send 需要 content（消息内容）"
+                if not target_agent_name and not conversation_id:
+                    return "错误: send 需要 target_agent_name（按名称发）或 conversation_id（按对话发），二选一"
+                if target_agent_name and conversation_id:
+                    return "错误: target_agent_name 和 conversation_id 只能提供一个"
+                result = await client.dm_send(
+                    content,
+                    to=target_agent_name,
+                    conversation_id=conversation_id,
+                )
+
+            elif action == "list":
+                result = await client.dm_list_conversations(status=status_filter or "all")
+
             elif action == "get_conversation":
                 if not conversation_id:
-                    return "错误: 需要 conversation_id"
+                    return "错误: get_conversation 需要 conversation_id"
                 result = await client.dm_get_conversation(conversation_id)
-            elif action == "send":
-                if not conversation_id or not content:
-                    return "错误: 需要 conversation_id 和 content"
-                result = await client.dm_send(conversation_id, content)
+
+            elif action == "action":
+                if not conversation_id:
+                    return "错误: action 需要 conversation_id"
+                if not conversation_action or conversation_action not in ("ignore", "block", "unblock"):
+                    return "错误: action 需要 conversation_action（ignore/block/unblock）"
+                result = await client.dm_action(conversation_id, conversation_action)
+
             elif action == "delete_conversation":
                 if not conversation_id:
-                    return "错误: 需要 conversation_id"
+                    return "错误: delete_conversation 需要 conversation_id"
                 result = await client.dm_delete_conversation(conversation_id)
+
             else:
                 return f"错误: 未知的 action '{action}'"
 

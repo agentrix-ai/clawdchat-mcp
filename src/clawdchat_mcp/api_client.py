@@ -274,37 +274,40 @@ class ClawdChatAgentClient:
 
     # ---- Direct Messages ----
 
-    async def dm_check(self) -> dict[str, Any]:
-        return await self._request("GET", "/api/v1/dm/check")
+    async def dm_send(
+        self,
+        message: str,
+        *,
+        to: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        needs_human_input: bool = False,
+    ) -> dict[str, Any]:
+        """POST /dm/send — 统一发送（按 agent_name 或 conversation_id）"""
+        body: dict[str, Any] = {"message": message}
+        if to:
+            body["to"] = to
+        if conversation_id:
+            body["conversation_id"] = conversation_id
+        if needs_human_input:
+            body["needs_human_input"] = True
+        return await self._request("POST", "/api/v1/dm/send", json=body)
 
-    async def dm_request(self, target_agent_name: str, message: str = "") -> dict[str, Any]:
-        return await self._request("POST", "/api/v1/dm/request", json={
-            "to": target_agent_name,
-            "message": message,
-        })
-
-    async def dm_list_requests(self) -> dict[str, Any]:
-        return await self._request("GET", "/api/v1/dm/requests")
-
-    async def dm_approve(self, conversation_id: str) -> dict[str, Any]:
-        return await self._request("POST", f"/api/v1/dm/requests/{conversation_id}/approve")
-
-    async def dm_reject(self, conversation_id: str) -> dict[str, Any]:
-        return await self._request("POST", f"/api/v1/dm/requests/{conversation_id}/reject")
-
-    async def dm_list_conversations(self) -> dict[str, Any]:
-        return await self._request("GET", "/api/v1/dm/conversations")
+    async def dm_list_conversations(self, status: str = "all") -> dict[str, Any]:
+        """GET /dm/conversations — 对话列表 + 未读汇总"""
+        return await self._request("GET", "/api/v1/dm/conversations", params={"status": status})
 
     async def dm_get_conversation(self, conversation_id: str) -> dict[str, Any]:
+        """GET /dm/conversations/{id} — 对话消息"""
         return await self._request("GET", f"/api/v1/dm/conversations/{conversation_id}")
 
-    async def dm_send(self, conversation_id: str, content: str) -> dict[str, Any]:
-        return await self._request("POST", f"/api/v1/dm/conversations/{conversation_id}/send", json={
-            "message": content,
+    async def dm_action(self, conversation_id: str, action: str) -> dict[str, Any]:
+        """POST /dm/conversations/{id}/action — 忽略/屏蔽/解除屏蔽"""
+        return await self._request("POST", f"/api/v1/dm/conversations/{conversation_id}/action", json={
+            "action": action,
         })
 
     async def dm_delete_conversation(self, conversation_id: str) -> dict[str, Any]:
-        """DELETE /api/v1/dm/conversations/{conversation_id} — 删除/退出对话。"""
+        """DELETE /dm/conversations/{id} — 删除对话"""
         return await self._request("DELETE", f"/api/v1/dm/conversations/{conversation_id}")
 
     # ---- Rate Limit (dev only) ----
