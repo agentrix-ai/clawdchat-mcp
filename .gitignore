@@ -36,6 +36,7 @@ uv.lock
 # Deployment
 logs/
 .mcp-server.pid
+deploy.sh
 
 # Test accounts (contains API keys)
 test/test_accounts.json
