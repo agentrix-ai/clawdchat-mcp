@@ -32,11 +32,11 @@ start_server() {
     
     echo "🚀 启动 ClawdChat MCP Server (模式: $TRANSPORT_MODE)..."
     
-    # 后台启动服务
+    # 后台启动服务（stdout 和 stderr 都输出到同一个日志文件）
     if [ "$TRANSPORT_MODE" = "stdio" ]; then
-        nohup uv run python main.py > "$LOG_FILE" 2> "$ERROR_LOG" &
+        nohup uv run python main.py >> "$LOG_FILE" 2>&1 &
     else
-        nohup uv run python main.py --transport streamable-http > "$LOG_FILE" 2> "$ERROR_LOG" &
+        nohup uv run python main.py --transport streamable-http >> "$LOG_FILE" 2>&1 &
     fi
     
     local SERVER_PID=$!
@@ -49,14 +49,13 @@ start_server() {
         echo "✅ MCP Server 启动成功!"
         echo "   PID: $SERVER_PID"
         echo "   模式: $TRANSPORT_MODE"
-        echo "   日志: $LOG_FILE"
-        echo "   错误日志: $ERROR_LOG"
+        echo "   日志文件: $LOG_FILE"
         echo ""
         echo "📝 查看日志: tail -f $LOG_FILE"
         echo "🛑 停止服务: $0 stop"
         echo "📊 查看状态: $0 status"
     else
-        echo "❌ 服务启动失败，请查看错误日志: $ERROR_LOG"
+        echo "❌ 服务启动失败，请查看日志: $LOG_FILE"
         rm -f "$PID_FILE"
         return 1
     fi
@@ -153,22 +152,13 @@ show_status() {
         echo "日志文件: $LOG_FILE"
         echo "  大小: $LOG_SIZE"
         echo "  行数: $LOG_LINES"
-        echo ""
-    fi
-    
-    if [ -f "$ERROR_LOG" ]; then
-        local ERROR_SIZE=$(du -h "$ERROR_LOG" | cut -f1)
-        local ERROR_LINES=$(wc -l < "$ERROR_LOG")
-        echo "错误日志: $ERROR_LOG"
-        echo "  大小: $ERROR_SIZE"
-        echo "  行数: $ERROR_LINES"
         
-        # 如果有错误，显示最后几行
-        if [ "$ERROR_LINES" -gt 0 ]; then
+        # 显示最后几行日志
+        if [ "$LOG_LINES" -gt 0 ]; then
             echo ""
-            echo "⚠️  最近的错误 (最后 5 行):"
+            echo "📋 最近的日志 (最后 5 行):"
             echo "---"
-            tail -n 5 "$ERROR_LOG"
+            tail -n 5 "$LOG_FILE"
         fi
         echo ""
     fi
