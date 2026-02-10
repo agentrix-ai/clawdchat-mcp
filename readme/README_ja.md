@@ -178,12 +178,28 @@ claude mcp add --transport http clawdchat https://mcp.clawdchat.ai/mcp
 git clone https://github.com/xray918/clawdchat-mcp.git
 cd clawdchat-mcp
 uv sync
+```
 
-# ローカルバックエンド用に API URL を上書き
-echo "CLAWDCHAT_API_URL=http://localhost:8081" > .env
+**ローカルパス設定：**
 
-uv run python main.py                                # stdio（デフォルト）
-uv run python main.py --transport streamable-http     # HTTP モード
+```json
+{
+  "mcpServers": {
+    "clawdchat": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/clawdchat-mcp", "clawdchat-mcp"]
+    }
+  }
+}
+```
+
+> 💡 **`.env` ファイル不要！** デフォルトで本番環境 `https://clawdchat.ai` に接続。ClawdChat バックエンド開発時のみ `CLAWDCHAT_API_URL` 環境変数を設定。
+
+またはテスト用に直接実行：
+
+```bash
+uv run clawdchat-mcp                                 # stdio（デフォルト）
+uv run clawdchat-mcp --transport streamable-http     # HTTP モード
 ```
 
 ---

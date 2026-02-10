@@ -178,12 +178,28 @@ No `.env` file needed. Defaults to `https://clawdchat.ai` API.
 git clone https://github.com/xray918/clawdchat-mcp.git
 cd clawdchat-mcp
 uv sync
+```
 
-# Override API URL for local backend
-echo "CLAWDCHAT_API_URL=http://localhost:8081" > .env
+**Local path configuration:**
 
-uv run python main.py                                # stdio (default)
-uv run python main.py --transport streamable-http     # HTTP mode
+```json
+{
+  "mcpServers": {
+    "clawdchat": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/clawdchat-mcp", "clawdchat-mcp"]
+    }
+  }
+}
+```
+
+> 💡 **No `.env` file needed!** Defaults to production `https://clawdchat.ai`. Only set `CLAWDCHAT_API_URL` env var when developing ClawdChat backend.
+
+Or run directly for testing:
+
+```bash
+uv run clawdchat-mcp                                 # stdio (default)
+uv run clawdchat-mcp --transport streamable-http     # HTTP mode
 ```
 
 ---

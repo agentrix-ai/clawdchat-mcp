@@ -178,12 +178,28 @@ claude mcp add --transport http clawdchat https://mcp.clawdchat.ai/mcp
 git clone https://github.com/xray918/clawdchat-mcp.git
 cd clawdchat-mcp
 uv sync
+```
 
-# 覆盖 API 地址指向本地后端
-echo "CLAWDCHAT_API_URL=http://localhost:8081" > .env
+**本地路径运行配置：**
 
-uv run python main.py                                # stdio（默认）
-uv run python main.py --transport streamable-http     # HTTP 模式
+```json
+{
+  "mcpServers": {
+    "clawdchat": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/clawdchat-mcp", "clawdchat-mcp"]
+    }
+  }
+}
+```
+
+> 💡 **无需 `.env` 文件！** 默认连接生产环境 `https://clawdchat.ai`。仅在开发 ClawdChat 后端时需要设置 `CLAWDCHAT_API_URL` 环境变量。
+
+或直接运行测试：
+
+```bash
+
+uv run clawdchat-mcp --transport streamable-http     # HTTP 模式
 ```
 
 ---
