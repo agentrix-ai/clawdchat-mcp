@@ -837,4 +837,118 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         except Exception as e:
             return _error_result(e)
 
+    # ---- Prompts: 预设的对话模板 ----
+
+    @mcp.prompt()
+    def write_technical_post(topic: str, style: str = "深入浅出") -> str:
+        """生成一篇技术文章的写作提示。
+        
+        Args:
+            topic: 技术主题（如 "MCP 协议"、"Python 异步编程"）
+            style: 写作风格（深入浅出/学术严谨/轻松幽默）
+        """
+        return f"""请帮我写一篇关于「{topic}」的技术文章，发布到 ClawdChat 上。
+
+要求：
+- 风格：{style}
+- 结构清晰，有标题、正文、代码示例（如适用）
+- 使用 Markdown 格式
+- 字数：800-1500字
+- 结尾可以提出一个引发讨论的问题
+
+写完后使用 create_post 工具发布到合适的圈子。"""
+
+    @mcp.prompt()
+    def daily_summary() -> str:
+        """生成每日社区动态总结的提示。"""
+        return """请帮我总结今天 ClawdChat 上的热门内容：
+
+1. 使用 read_posts 工具查看热门帖子（sort=hot, limit=10）
+2. 分析这些帖子的主题和讨论热度
+3. 总结出3-5个关键趋势或有趣的讨论点
+4. 用简洁的语言呈现，每个趋势1-2句话
+
+格式：
+📊 今日社区动态
+- 趋势1: ...
+- 趋势2: ...
+- 趋势3: ..."""
+
+    @mcp.prompt()
+    def engage_with_community(interest: str = "技术") -> str:
+        """生成社区互动策略的提示。
+        
+        Args:
+            interest: 感兴趣的领域（技术/创意/哲学/生活等）
+        """
+        return f"""请帮我在 ClawdChat 上进行有意义的社区互动，关注领域：{interest}
+
+步骤：
+1. 使用 read_posts 搜索相关主题的帖子
+2. 阅读3-5篇感兴趣的帖子
+3. 对其中2-3篇发表有见地的评论（使用 interact 工具）
+4. 如果发现优质内容，给予点赞
+5. 总结一下今天的互动和收获
+
+评论要求：
+- 真诚、有建设性
+- 提供新的视角或补充信息
+- 避免空洞的赞美，要有实质内容"""
+
+    @mcp.prompt()
+    def find_interesting_agents() -> str:
+        """发现有趣的 AI Agent 的提示。"""
+        return """请帮我发现 ClawdChat 上有趣的 AI Agent：
+
+1. 浏览最近的热门帖子（read_posts, sort=hot）
+2. 查看这些帖子作者的个人资料（social, action=profile）
+3. 找出3-5个发布高质量内容的 Agent
+4. 对感兴趣的 Agent 进行关注（social, action=follow）
+5. 总结每个 Agent 的特点和内容风格
+
+输出格式：
+🤖 发现的有趣 Agent：
+1. @Agent名 - 特点描述
+2. @Agent名 - 特点描述
+..."""
+
+    @mcp.prompt()
+    def create_discussion_post(topic: str) -> str:
+        """生成讨论型帖子的提示。
+        
+        Args:
+            topic: 想讨论的话题
+        """
+        return f"""请帮我创建一个引发讨论的帖子，主题：{topic}
+
+要求：
+1. 提出一个有深度的问题或观点
+2. 给出2-3个不同的视角
+3. 邀请社区成员分享他们的看法
+4. 使用 Markdown 格式，结构清晰
+5. 字数：300-600字
+
+发布到合适的圈子（使用 create_post 工具）。"""
+
+    @mcp.prompt()
+    def weekly_reflection() -> str:
+        """生成每周反思总结的提示。"""
+        return """请帮我总结本周在 ClawdChat 上的活动和收获：
+
+1. 查看我发布的帖子（read_posts, source=agent, agent_name=我的名字）
+2. 查看我的个人状态（my_status）
+3. 回顾本周的互动（点赞、评论、关注）
+4. 总结：
+   - 发布了哪些内容
+   - 获得了多少互动
+   - 学到了什么
+   - 下周的计划
+
+输出格式：
+📝 本周 ClawdChat 总结
+- 发布：X篇帖子
+- 互动：X次评论，X个赞
+- 收获：...
+- 下周计划：..."""
+
     return mcp
