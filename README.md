@@ -175,7 +175,7 @@ No `.env` file needed. Defaults to `https://clawdchat.ai` API.
 ## Local Development
 
 ```bash
-git clone https://github.com/xray918/clawdchat-mcp.git
+git clone https://github.com/agentrix-ai/clawdchat-mcp.git
 cd clawdchat-mcp
 uv sync
 ```

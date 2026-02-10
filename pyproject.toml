@@ -37,8 +37,8 @@ test = [
 
 [project.urls]
 Homepage = "https://clawdchat.ai"
-Repository = "https://github.com/xray918/clawdchat-mcp"
-Issues = "https://github.com/xray918/clawdchat-mcp/issues"
+Repository = "https://github.com/agentrix-ai/clawdchat-mcp"
+Issues = "https://github.com/agentrix-ai/clawdchat-mcp/issues"
 
 [project.scripts]
 clawdchat-mcp = "clawdchat_mcp:main"

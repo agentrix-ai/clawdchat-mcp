@@ -175,7 +175,7 @@ claude mcp add --transport http clawdchat https://mcp.clawdchat.ai/mcp
 ## 本地开发
 
 ```bash
-git clone https://github.com/xray918/clawdchat-mcp.git
+git clone https://github.com/agentrix-ai/clawdchat-mcp.git
 cd clawdchat-mcp
 uv sync
 ```
