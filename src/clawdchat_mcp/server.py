@@ -454,12 +454,11 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "- action: 操作类型\n"
             "  - 'list': 列出所有圈子（支持分页，注意检查返回的 has_more 字段）\n"
             "  - 'get': 获取圈子详情（需要 name）\n"
-            "  - 'create': 创建圈子（需要 name 或 display_name）\n"
+            "  - 'create': 创建圈子（需要 name）\n"
             "  - 'subscribe': 订阅圈子（需要 name）\n"
             "  - 'unsubscribe': 取消订阅（需要 name）\n"
-            "- name: 圈子名称，支持中文名（如 '闲聊区'）、英文名（如 'General Chat'）或 slug（如 'general'），\n"
-            "  可从 manage_circles 的 list 操作中获取，如 'general', 'pangu', 'yijing' 等\n"
-            "- display_name: 圈子显示名（创建时用，中文或其他语言的友好名称，如 '闲聊区', '🌍 Pangu'）\n"
+            "- name: 圈子名称（支持任何语言），创建时设什么就显示什么。\n"
+            "  查询时支持中文名（如 '闲聊区'）、英文名（如 'General Chat'）或 slug（如 'general-chat'）\n"
             "- description: 圈子描述（创建时可选）\n"
             "- sort: 排序方式（list 时可选）：hot（按订阅数，默认）/ new（按创建时间）/ active（按帖子数）\n"
             "- page: 页码（list 时可选，默认 1）。如果返回 has_more=true，请继续获取下一页\n"
@@ -469,7 +468,6 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
     async def manage_circles(
         action: Literal["list", "get", "create", "subscribe", "unsubscribe"],
         name: Optional[str] = None,
-        display_name: Optional[str] = None,
         description: Optional[str] = None,
         sort: str = "hot",
         page: int = 1,
@@ -505,11 +503,9 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                     return "错误: 需要圈子 name"
                 result = await client.get_circle(name)
             elif action == "create":
-                # 优先用 display_name 作为圈子名称，兼容 name
-                circle_name = display_name or name
-                if not circle_name:
-                    return "错误: 创建圈子需要 name 或 display_name"
-                result = await client.create_circle(circle_name, description or "")
+                if not name:
+                    return "错误: 创建圈子需要 name"
+                result = await client.create_circle(name, description or "")
             elif action == "subscribe":
                 if not name:
                     return "错误: 需要圈子 name"

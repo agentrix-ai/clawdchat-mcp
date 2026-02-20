@@ -120,8 +120,8 @@ class TestListPosts:
         result = await tester_client.list_posts(sort="hot", limit=5)
         assert isinstance(result, dict)
 
-    async def test_list_posts_with_circle_display_name(self, tester_client, shared_post):
-        """用中文显示名筛选圈子（智能圈子查询）。"""
+    async def test_list_posts_with_circle_name(self, tester_client, shared_post):
+        """用中文名筛选圈子（智能圈子查询）。"""
         result = await tester_client.list_posts(circle="闲聊区", sort="new", limit=5)
         assert isinstance(result, dict)
 

@@ -18,14 +18,13 @@ from clawdchat_mcp.api_client import ClawdChatAPIError
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
-# 固定的测试圈子名称，所有测试都使用这个圈子
-TEST_CIRCLE_DISPLAY_NAME = "自动化测试圈子"
+TEST_CIRCLE_NAME = "自动化测试圈子"
 
 
 @pytest_asyncio.fixture(scope="module")
-async def test_circle_display_name():
-    """返回固定的测试圈子显示名。"""
-    return TEST_CIRCLE_DISPLAY_NAME
+async def test_circle_name():
+    """返回固定的测试圈子名称。"""
+    return TEST_CIRCLE_NAME
 
 
 class TestListCircles:
@@ -43,15 +42,16 @@ class TestListCircles:
         circles = result.get("circles", [])
         assert len(circles) > 0, "应该至少有一个圈子"
 
-    async def test_list_circles_circle_has_both_names(self, tester_client):
-        """每个圈子应包含 name (slug) 和 display_name。"""
+    async def test_list_circles_circle_has_name_and_slug(self, tester_client):
+        """每个圈子应包含 name（显示名）和 slug（URL 标识符）。"""
         result = await tester_client.list_circles(limit=5)
         circles = result.get("circles", [])
         if not circles:
             pytest.skip("没有可用的圈子")
         for circle in circles:
-            assert "name" in circle, "圈子应有 name (slug) 字段"
-            assert "display_name" in circle, "圈子应有 display_name 字段"
+            assert "name" in circle, "圈子应有 name（显示名）字段"
+            assert "slug" in circle, "圈子应有 slug（URL 标识符）字段"
+            assert "display_name" not in circle, "圈子不应暴露 display_name 字段"
 
     async def test_list_circles_sort_new(self, tester_client):
         """按创建时间排序。"""
@@ -102,28 +102,28 @@ class TestGetCircle:
     """测试 get_circle() — 获取圈子详情（支持多种名称格式）。"""
 
     async def test_get_circle_by_slug(self, tester_client):
-        """用 slug (name) 获取圈子。"""
+        """用 slug 获取圈子。"""
         circles_data = await tester_client.list_circles(limit=5)
         circles = circles_data.get("circles", [])
         if not circles:
             pytest.skip("没有可用的圈子")
 
-        circle_slug = circles[0].get("name")
+        circle_slug = circles[0].get("slug")
         result = await tester_client.get_circle(circle_slug)
         assert isinstance(result, dict)
-        assert result["name"] == circle_slug
+        assert result["slug"] == circle_slug
 
-    async def test_get_circle_by_display_name(self, tester_client):
-        """用 display_name (中文名) 获取圈子。"""
+    async def test_get_circle_by_name(self, tester_client):
+        """用 name（显示名，可能是中文）获取圈子。"""
         circles_data = await tester_client.list_circles(limit=5)
         circles = circles_data.get("circles", [])
         if not circles:
             pytest.skip("没有可用的圈子")
 
-        display_name = circles[0].get("display_name")
-        result = await tester_client.get_circle(display_name)
+        circle_name = circles[0].get("name")
+        result = await tester_client.get_circle(circle_name)
         assert isinstance(result, dict)
-        assert result["display_name"] == display_name
+        assert result["name"] == circle_name
 
     async def test_get_circle_nonexistent(self, tester_client):
         with pytest.raises(ClawdChatAPIError):
@@ -133,48 +133,43 @@ class TestGetCircle:
 class TestCreateCircle:
     """测试 create_circle() — 创建圈子。
 
-    新签名: create_circle(name, description="")
-    name 为显示名（支持中文），系统自动生成 slug。
+    create_circle(name, description="")
+    name 为显示名（支持任何语言），系统自动生成 slug。
     
     注意：圈子无法删除，测试会先检查是否已存在，避免重复创建测试垃圾。
     """
 
-    async def test_create_circle_success(self, tester_client, test_circle_display_name):
-        """创建一个测试圈子（传入中文显示名）。如果已存在则跳过。"""
-        # 先检查圈子是否已存在
+    async def test_create_circle_success(self, tester_client, test_circle_name):
+        """创建一个测试圈子（传入中文名）。如果已存在则跳过。"""
         try:
-            existing = await tester_client.get_circle(test_circle_display_name)
+            existing = await tester_client.get_circle(test_circle_name)
             if existing:
-                pytest.skip(f"圈子 '{test_circle_display_name}' 已存在，跳过创建测试")
+                pytest.skip(f"圈子 '{test_circle_name}' 已存在，跳过创建测试")
         except ClawdChatAPIError:
-            # 圈子不存在，继续创建
             pass
         
         result = await tester_client.create_circle(
-            name=test_circle_display_name,
+            name=test_circle_name,
             description="这是自动化测试创建的圈子，可以安全删除。",
         )
         assert isinstance(result, dict)
-        # 返回的 display_name 应等于输入的 name
-        assert result.get("display_name") == test_circle_display_name
-        # 返回的 name (slug) 应是英文格式
-        slug = result.get("name", "")
+        # 返回的 name 应等于输入的名称
+        assert result.get("name") == test_circle_name
+        # 返回的 slug 应是英文格式
+        slug = result.get("slug", "")
         assert slug, "应返回自动生成的 slug"
-        # slug 不应包含中文
         assert all(ord(c) < 128 for c in slug), f"slug 应为 ASCII: {slug}"
 
-    async def test_create_duplicate_circle(self, tester_client, test_circle_display_name):
+    async def test_create_duplicate_circle(self, tester_client, test_circle_name):
         """重复创建同名圈子应该失败。"""
-        # 先确保圈子已存在
         try:
-            await tester_client.get_circle(test_circle_display_name)
+            await tester_client.get_circle(test_circle_name)
         except ClawdChatAPIError:
-            pytest.skip(f"圈子 '{test_circle_display_name}' 不存在，无法测试重复创建")
+            pytest.skip(f"圈子 '{test_circle_name}' 不存在，无法测试重复创建")
         
-        # 尝试重复创建应该失败
         with pytest.raises(ClawdChatAPIError):
             await tester_client.create_circle(
-                name=test_circle_display_name,
+                name=test_circle_name,
                 description="",
             )
 
@@ -182,7 +177,7 @@ class TestCreateCircle:
 class TestSubscribeCircle:
     """测试圈子订阅 — subscribe_circle() / unsubscribe_circle()。
 
-    支持用 slug、display_name 或格式化英文名订阅。
+    支持用 slug 或 name（中文名）订阅。
     """
 
     async def test_subscribe_by_slug(self, tester_client):
@@ -192,37 +187,35 @@ class TestSubscribeCircle:
         if not circles:
             pytest.skip("没有可用的圈子")
 
-        slug = circles[0].get("name")
+        slug = circles[0].get("slug")
         result = await tester_client.subscribe_circle(slug)
         assert isinstance(result, dict)
-        # 清理：取消订阅
         await tester_client.unsubscribe_circle(slug)
 
-    async def test_subscribe_by_display_name(self, tester_client):
-        """用 display_name (中文名) 订阅圈子。"""
+    async def test_subscribe_by_name(self, tester_client):
+        """用 name（中文名）订阅圈子。"""
         circles_data = await tester_client.list_circles(limit=5)
         circles = circles_data.get("circles", [])
         if not circles:
             pytest.skip("没有可用的圈子")
 
-        display_name = circles[0].get("display_name")
-        result = await tester_client.subscribe_circle(display_name)
+        circle_name = circles[0].get("name")
+        result = await tester_client.subscribe_circle(circle_name)
         assert isinstance(result, dict)
-        # 清理：取消订阅
-        await tester_client.unsubscribe_circle(display_name)
+        await tester_client.unsubscribe_circle(circle_name)
 
-    async def test_subscribe_and_unsubscribe(self, tester_client, test_circle_display_name):
+    async def test_subscribe_and_unsubscribe(self, tester_client, test_circle_name):
         """订阅再取消订阅测试圈子。"""
-        result = await tester_client.subscribe_circle(test_circle_display_name)
+        result = await tester_client.subscribe_circle(test_circle_name)
         assert isinstance(result, dict)
 
-        result = await tester_client.unsubscribe_circle(test_circle_display_name)
+        result = await tester_client.unsubscribe_circle(test_circle_name)
         assert isinstance(result, dict)
 
-    async def test_target_subscribe_and_unsubscribe(self, target_client, test_circle_display_name):
+    async def test_target_subscribe_and_unsubscribe(self, target_client, test_circle_name):
         """被测虾也可以订阅和取消订阅。"""
-        await target_client.subscribe_circle(test_circle_display_name)
-        result = await target_client.unsubscribe_circle(test_circle_display_name)
+        await target_client.subscribe_circle(test_circle_name)
+        result = await target_client.unsubscribe_circle(test_circle_name)
         assert isinstance(result, dict)
 
 
@@ -236,13 +229,13 @@ class TestCircleFeed:
         if not circles:
             pytest.skip("没有可用的圈子")
 
-        circle_name = circles[0].get("name")
-        result = await tester_client.get_circle_feed(circle_name, sort="new", limit=5)
+        circle_slug = circles[0].get("slug")
+        result = await tester_client.get_circle_feed(circle_slug, sort="new", limit=5)
         assert isinstance(result, dict)
 
-    async def test_circle_feed_empty_circle(self, tester_client, test_circle_display_name):
+    async def test_circle_feed_empty_circle(self, tester_client, test_circle_name):
         """新建圈子的 feed 应该为空或返回空列表。"""
-        result = await tester_client.get_circle_feed(test_circle_display_name, sort="new", limit=5)
+        result = await tester_client.get_circle_feed(test_circle_name, sort="new", limit=5)
         assert isinstance(result, dict)
 
     async def test_circle_feed_pagination(self, tester_client):
@@ -252,7 +245,7 @@ class TestCircleFeed:
         if not circles:
             pytest.skip("没有可用的圈子")
 
-        circle_name = circles[0].get("name")
-        result = await tester_client.get_circle_feed(circle_name, sort="new", page=1, limit=3)
+        circle_slug = circles[0].get("slug")
+        result = await tester_client.get_circle_feed(circle_slug, sort="new", page=1, limit=3)
         assert isinstance(result, dict)
         assert "posts" in result or "total" in result
