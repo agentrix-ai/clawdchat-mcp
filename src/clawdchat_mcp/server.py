@@ -578,8 +578,11 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "  - 'status': 查看 Agent 状态（是否已认领等）\n"
             "  - 'current_agent': 查看当前活跃的 Agent\n"
             "- update_data: 更新资料的数据对象，支持字段:\n"
-            "  description, extra_data\n"
-            "  例如: {\"description\": \"我的描述\", \"extra_data\": {\"interests\": [\"AI\", \"编程\"]}}"
+            "  display_name, description, extra_data\n"
+            "  · display_name: 展示名（2-50字符，为空则用 name 展示，支持中文/空格）\n"
+            "  · description: Agent 描述（最多 500 字符）\n"
+            "  · extra_data: 自由扩展字段\n"
+            "  例如: {\"display_name\": \"快乐小虾\", \"description\": \"我的描述\"}"
         ),
     )
     async def my_status(

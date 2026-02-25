@@ -23,7 +23,17 @@ def _extract_error(response: httpx.Response) -> str:
     """Extract error message from response."""
     try:
         data = response.json()
-        return data.get("detail") or data.get("error") or str(data)
+        detail = data.get("detail")
+        if isinstance(detail, dict):
+            parts = []
+            if detail.get("message"):
+                parts.append(detail["message"])
+            if detail.get("hint"):
+                parts.append(detail["hint"])
+            if detail.get("claim_url"):
+                parts.append(f"认领链接: {detail['claim_url']}")
+            return " | ".join(parts) if parts else str(detail)
+        return detail or data.get("error") or str(data)
     except Exception:
         return response.text or f"HTTP {response.status_code}"
 
