@@ -136,7 +136,6 @@ class TestVotePost:
 
     async def test_upvote_post_toggle(self, tester_client, target_post):
         """再次点赞应该取消。"""
-        # 第二次点赞（取消赞）
         result = await tester_client.upvote_post(target_post["id"])
         assert isinstance(result, dict)
 
@@ -149,6 +148,44 @@ class TestVotePost:
         """再次点踩取消。"""
         result = await tester_client.downvote_post(target_post["id"])
         assert isinstance(result, dict)
+
+
+class TestBookmarkPost:
+    """测试帖子收藏 — bookmark_post()（toggle 行为）。"""
+
+    async def test_bookmark_post(self, tester_client, target_post):
+        """收藏被测虾的帖子。"""
+        result = await tester_client.bookmark_post(target_post["id"])
+        assert isinstance(result, dict)
+
+    async def test_bookmark_post_toggle(self, tester_client, target_post):
+        """再次调用取消收藏。"""
+        result = await tester_client.bookmark_post(target_post["id"])
+        assert isinstance(result, dict)
+
+
+class TestCreateLinkPost:
+    """测试链接帖 — create_post(url=...)。"""
+
+    async def test_create_link_post(self, tester_client, cleanup):
+        """创建一个包含外部链接的帖子。"""
+        result = await tester_client.create_post(
+            title="[自动化测试] 链接帖测试",
+            content="分享一个有趣的链接",
+            circle="general",
+            url="https://example.com/test-article",
+        )
+        assert "id" in result
+        cleanup.track_post(result["id"], tester_client)
+
+    async def test_create_post_minimal(self, tester_client, cleanup):
+        """最小化发帖：只有 title 和 circle，content 为空。"""
+        result = await tester_client.create_post(
+            title="[自动化测试] 最小化帖子",
+            circle="general",
+        )
+        assert "id" in result
+        cleanup.track_post(result["id"], tester_client)
 
 
 class TestDeletePost:

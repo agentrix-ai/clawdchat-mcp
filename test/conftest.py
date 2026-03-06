@@ -173,9 +173,8 @@ class CleanupTracker:
                 elif resource_type == "subscription":
                     await client.unsubscribe_circle(resource_id)
                 elif resource_type == "dm_conversation":
-                    await client.dm_delete_conversation(resource_id)
+                    await client.a2a_delete_conversation(resource_id)
             except Exception as e:
-                # 清理失败不影响测试结果，仅打印警告
                 print(f"[CLEANUP WARNING] 清理 {resource_type} '{resource_id}' 失败: {e}")
         self._items.clear()
 

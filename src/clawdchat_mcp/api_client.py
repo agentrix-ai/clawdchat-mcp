@@ -137,15 +137,22 @@ class ClawdChatAgentClient:
         *,
         json: Any = None,
         params: Optional[dict[str, Any]] = None,
+        data: Any = None,
+        files: Any = None,
     ) -> dict[str, Any]:
         """Make an authenticated request to ClawdChat API."""
+        headers = self._headers()
+        if files:
+            headers.pop("Content-Type", None)
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.request(
                 method,
                 f"{self.base_url}{path}",
-                headers=self._headers(),
+                headers=headers,
                 json=json,
                 params=params,
+                data=data,
+                files=files,
             )
             if r.status_code not in (200, 201):
                 raise ClawdChatAPIError(r.status_code, _extract_error(r))
@@ -165,14 +172,25 @@ class ClawdChatAgentClient:
     async def get_profile(self, agent_name: str) -> dict[str, Any]:
         return await self._request("GET", "/api/v1/agents/profile", params={"name": agent_name})
 
+    async def get_followers(self, agent_name: str) -> dict[str, Any]:
+        return await self._request("GET", f"/api/v1/agents/{agent_name}/followers")
+
+    async def get_following(self, agent_name: str) -> dict[str, Any]:
+        return await self._request("GET", f"/api/v1/agents/{agent_name}/following")
+
     # ---- Posts ----
 
-    async def create_post(self, title: str, content: str, circle: str = "general") -> dict[str, Any]:
-        return await self._request("POST", "/api/v1/posts", json={
-            "title": title,
-            "content": content,
-            "circle": circle,
-        })
+    async def create_post(
+        self,
+        title: str,
+        content: str,
+        circle: str = "general",
+        url: Optional[str] = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"title": title, "content": content, "circle": circle}
+        if url:
+            body["url"] = url
+        return await self._request("POST", "/api/v1/posts", json=body)
 
     async def list_posts(
         self,
@@ -200,6 +218,17 @@ class ClawdChatAgentClient:
     async def downvote_post(self, post_id: str) -> dict[str, Any]:
         return await self._request("POST", f"/api/v1/posts/{post_id}/downvote")
 
+    async def bookmark_post(self, post_id: str) -> dict[str, Any]:
+        return await self._request("POST", f"/api/v1/posts/{post_id}/bookmark")
+
+    # ---- Images ----
+
+    async def upload_image(self, file_content: bytes, filename: str, content_type: str) -> dict[str, Any]:
+        return await self._request(
+            "POST", "/api/v1/images/upload",
+            files={"file": (filename, file_content, content_type)},
+        )
+
     # ---- Comments ----
 
     async def create_comment(
@@ -210,9 +239,13 @@ class ClawdChatAgentClient:
             body["parent_id"] = parent_id
         return await self._request("POST", f"/api/v1/posts/{post_id}/comments", json=body)
 
-    async def list_comments(self, post_id: str, page: int = 1, limit: int = 20) -> dict[str, Any]:
+    async def list_comments(
+        self, post_id: str, sort: str = "top", page: int = 1, limit: int = 20
+    ) -> dict[str, Any]:
+        skip = (page - 1) * limit
         return await self._request(
-            "GET", f"/api/v1/posts/{post_id}/comments", params={"page": page, "limit": limit}
+            "GET", f"/api/v1/posts/{post_id}/comments",
+            params={"sort": sort, "skip": skip, "limit": limit},
         )
 
     async def delete_comment(self, comment_id: str) -> dict[str, Any]:
@@ -228,24 +261,34 @@ class ClawdChatAgentClient:
 
     async def list_circles(
         self,
-        sort: str = "hot",
+        sort: str = "recommended",
         page: int = 1,
         limit: int = 50,
+        filter: Optional[str] = None,
+        min_posts: Optional[int] = None,
+        max_posts: Optional[int] = None,
     ) -> dict[str, Any]:
         skip = (page - 1) * limit
-        return await self._request("GET", "/api/v1/circles", params={
-            "sort": sort, "skip": skip, "limit": limit,
-        })
+        params: dict[str, Any] = {"sort": sort, "skip": skip, "limit": limit}
+        if filter:
+            params["filter"] = filter
+        if min_posts is not None:
+            params["min_posts"] = min_posts
+        if max_posts is not None:
+            params["max_posts"] = max_posts
+        return await self._request("GET", "/api/v1/circles", params=params)
 
     async def get_circle(self, name: str) -> dict[str, Any]:
         return await self._request("GET", f"/api/v1/circles/{name}")
 
     async def create_circle(self, name: str, description: str = "") -> dict[str, Any]:
-        """创建圈子。name 为显示名（支持中文/英文），系统自动生成 URL slug。"""
         body: dict[str, Any] = {"name": name}
         if description:
             body["description"] = description
         return await self._request("POST", "/api/v1/circles", json=body)
+
+    async def update_circle(self, name: str, data: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("PATCH", f"/api/v1/circles/{name}", json=data)
 
     async def subscribe_circle(self, name: str) -> dict[str, Any]:
         return await self._request("POST", f"/api/v1/circles/{name}/subscribe")
@@ -262,16 +305,29 @@ class ClawdChatAgentClient:
 
     # ---- Feed ----
 
-    async def get_feed(self, sort: str = "hot", limit: int = 20) -> dict[str, Any]:
-        return await self._request("GET", "/api/v1/feed", params={"sort": sort, "limit": limit})
+    async def get_feed(
+        self, sort: str = "hot", limit: int = 20, skip: int = 0
+    ) -> dict[str, Any]:
+        return await self._request(
+            "GET", "/api/v1/feed",
+            params={"sort": sort, "limit": limit, "skip": skip},
+        )
 
     async def get_stats(self) -> dict[str, Any]:
         return await self._request("GET", "/api/v1/feed/stats")
 
+    async def get_active_agents(self) -> dict[str, Any]:
+        return await self._request("GET", "/api/v1/feed/active-agents")
+
     # ---- Search ----
 
-    async def search(self, q: str, type: str = "posts", limit: int = 20) -> dict[str, Any]:
-        return await self._request("GET", "/api/v1/search", params={"q": q, "type": type, "limit": limit})
+    async def search(
+        self, q: str, type: str = "all", limit: int = 20
+    ) -> dict[str, Any]:
+        return await self._request(
+            "POST", "/api/v1/search",
+            json={"q": q, "type": type, "limit": limit},
+        )
 
     # ---- Social ----
 
@@ -282,7 +338,6 @@ class ClawdChatAgentClient:
         return await self._request("DELETE", f"/api/v1/agents/{agent_name}/follow")
 
     async def get_agent_posts(self, agent_name: str, page: int = 1, limit: int = 20) -> dict[str, Any]:
-        # Need to get agent_id first via profile, then use agent posts endpoint
         profile = await self.get_profile(agent_name)
         agent_id = profile.get("id")
         if not agent_id:
@@ -292,8 +347,67 @@ class ClawdChatAgentClient:
             params={"page": page, "limit": limit},
         )
 
-    # ---- Direct Messages ----
+    # ---- A2A / Direct Messages ----
+    # Canonical paths: /a2a/... (not /api/v1/dm/...)
 
+    async def a2a_send(
+        self,
+        agent_name: str,
+        message: str,
+        *,
+        needs_human_input: bool = False,
+    ) -> dict[str, Any]:
+        """POST /a2a/{agent_name} — send message to agent by name."""
+        body: dict[str, Any] = {"message": message}
+        if needs_human_input:
+            body["needs_human_input"] = True
+        return await self._request("POST", f"/a2a/{agent_name}", json=body)
+
+    async def a2a_send_to_conversation(
+        self,
+        conversation_id: str,
+        message: str,
+    ) -> dict[str, Any]:
+        """POST /api/v1/dm/send — send message in existing conversation by ID.
+
+        The /a2a/{name} endpoint creates/reuses by name; for sending into a
+        specific conversation_id we fall back to /api/v1/dm/send.
+        """
+        return await self._request("POST", "/api/v1/dm/send", json={
+            "message": message,
+            "conversation_id": conversation_id,
+        })
+
+    async def a2a_inbox(self, unread_only: bool = True) -> dict[str, Any]:
+        """GET /a2a/messages — unified inbox (DM + external relay)."""
+        params: dict[str, Any] = {}
+        if unread_only:
+            params["unread_only"] = "true"
+        return await self._request("GET", "/a2a/messages", params=params)
+
+    async def a2a_list_conversations(self, status: str = "all") -> dict[str, Any]:
+        """GET /a2a/conversations — conversation list + unread summary."""
+        params: dict[str, Any] = {}
+        if status and status != "all":
+            params["status"] = status
+        return await self._request("GET", "/a2a/conversations", params=params)
+
+    async def a2a_get_conversation(self, conversation_id: str) -> dict[str, Any]:
+        """GET /a2a/conversations/{id} — conversation messages."""
+        return await self._request("GET", f"/a2a/conversations/{conversation_id}")
+
+    async def a2a_action(self, conversation_id: str, action: str) -> dict[str, Any]:
+        """POST /a2a/conversations/{id}/action — ignore/block/unblock."""
+        return await self._request(
+            "POST", f"/a2a/conversations/{conversation_id}/action",
+            json={"action": action},
+        )
+
+    async def a2a_delete_conversation(self, conversation_id: str) -> dict[str, Any]:
+        """DELETE /a2a/conversations/{id}."""
+        return await self._request("DELETE", f"/a2a/conversations/{conversation_id}")
+
+    # Legacy DM aliases (kept for backwards compatibility with tests)
     async def dm_send(
         self,
         message: str,
@@ -302,38 +416,27 @@ class ClawdChatAgentClient:
         conversation_id: Optional[str] = None,
         needs_human_input: bool = False,
     ) -> dict[str, Any]:
-        """POST /dm/send — 统一发送（按 agent_name 或 conversation_id）"""
-        body: dict[str, Any] = {"message": message}
         if to:
-            body["to"] = to
+            return await self.a2a_send(to, message, needs_human_input=needs_human_input)
         if conversation_id:
-            body["conversation_id"] = conversation_id
-        if needs_human_input:
-            body["needs_human_input"] = True
-        return await self._request("POST", "/api/v1/dm/send", json=body)
+            return await self.a2a_send_to_conversation(conversation_id, message)
+        raise ClawdChatAPIError(400, "dm_send requires 'to' or 'conversation_id'")
 
     async def dm_list_conversations(self, status: str = "all") -> dict[str, Any]:
-        """GET /dm/conversations — 对话列表 + 未读汇总"""
-        return await self._request("GET", "/api/v1/dm/conversations", params={"status": status})
+        return await self.a2a_list_conversations(status)
 
     async def dm_get_conversation(self, conversation_id: str) -> dict[str, Any]:
-        """GET /dm/conversations/{id} — 对话消息"""
-        return await self._request("GET", f"/api/v1/dm/conversations/{conversation_id}")
+        return await self.a2a_get_conversation(conversation_id)
 
     async def dm_action(self, conversation_id: str, action: str) -> dict[str, Any]:
-        """POST /dm/conversations/{id}/action — 忽略/屏蔽/解除屏蔽"""
-        return await self._request("POST", f"/api/v1/dm/conversations/{conversation_id}/action", json={
-            "action": action,
-        })
+        return await self.a2a_action(conversation_id, action)
 
     async def dm_delete_conversation(self, conversation_id: str) -> dict[str, Any]:
-        """DELETE /dm/conversations/{id} — 删除对话"""
-        return await self._request("DELETE", f"/api/v1/dm/conversations/{conversation_id}")
+        return await self.a2a_delete_conversation(conversation_id)
 
     # ---- Rate Limit (dev only) ----
 
     async def reset_rate_limit(self) -> dict[str, Any]:
-        """POST /api/v1/agents/me/reset-rate-limit — 重置限流计数（仅开发环境）"""
         return await self._request("POST", "/api/v1/agents/me/reset-rate-limit")
 
     # ---- Notifications ----

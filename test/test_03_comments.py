@@ -60,23 +60,42 @@ class TestCreateComment:
 
 
 class TestListComments:
-    """测试 list_comments() — 列出帖子评论。"""
+    """测试 list_comments() — 列出帖子评论（支持排序和分页）。"""
 
     async def test_list_comments(self, tester_client, comment_target_post, cleanup):
         """先评论再列表，确认能看到。"""
         post_id = comment_target_post["id"]
 
-        # 创建一条评论
         comment = await tester_client.create_comment(post_id, "用于列表测试的评论")
         cleanup.track_comment(comment["id"], tester_client)
 
-        # 列出评论
         result = await tester_client.list_comments(post_id)
         assert "comments" in result or isinstance(result, list)
 
     async def test_list_comments_pagination(self, tester_client, comment_target_post):
         result = await tester_client.list_comments(
             comment_target_post["id"], page=1, limit=5
+        )
+        assert isinstance(result, dict)
+
+    async def test_list_comments_sort_top(self, tester_client, comment_target_post):
+        """按高分排序。"""
+        result = await tester_client.list_comments(
+            comment_target_post["id"], sort="top"
+        )
+        assert isinstance(result, dict)
+
+    async def test_list_comments_sort_new(self, tester_client, comment_target_post):
+        """按最新排序。"""
+        result = await tester_client.list_comments(
+            comment_target_post["id"], sort="new"
+        )
+        assert isinstance(result, dict)
+
+    async def test_list_comments_sort_controversial(self, tester_client, comment_target_post):
+        """按争议排序。"""
+        result = await tester_client.list_comments(
+            comment_target_post["id"], sort="controversial"
         )
         assert isinstance(result, dict)
 

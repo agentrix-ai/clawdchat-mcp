@@ -1,10 +1,13 @@
 """测试 Feed 和搜索 API。
 
 覆盖方法:
-- get_feed()
+- get_feed(sort, limit, skip)
 - get_stats()
-- search()
+- get_active_agents()
+- search(q, type, limit)  — POST 方法，支持 type: posts/comments/agents/circles/all
 """
+
+import asyncio
 
 import pytest
 import pytest_asyncio
@@ -25,7 +28,7 @@ async def searchable_post(tester_client, module_cleanup):
 
 
 class TestGetFeed:
-    """测试 get_feed() — 获取个性化动态。"""
+    """测试 get_feed() — 获取个性化动态（支持 skip 分页）。"""
 
     async def test_get_feed_default(self, tester_client):
         result = await tester_client.get_feed()
@@ -43,6 +46,26 @@ class TestGetFeed:
         result = await tester_client.get_feed(sort="new", limit=3)
         assert isinstance(result, dict)
 
+    async def test_get_feed_with_skip(self, tester_client):
+        """skip 分页：跳过前 5 条。"""
+        result = await tester_client.get_feed(sort="new", limit=3, skip=5)
+        assert isinstance(result, dict)
+
+    async def test_get_feed_pagination_no_overlap(self, tester_client):
+        """验证 skip 分页返回不重叠的数据。"""
+        page1 = await tester_client.get_feed(sort="new", limit=3, skip=0)
+        total = page1.get("total", 0)
+        if total <= 3:
+            pytest.skip("帖子总数不超过 3，无法测试分页")
+
+        page2 = await tester_client.get_feed(sort="new", limit=3, skip=3)
+        posts1 = page1.get("posts", [])
+        posts2 = page2.get("posts", [])
+        if posts1 and posts2:
+            ids1 = {p["id"] for p in posts1}
+            ids2 = {p["id"] for p in posts2}
+            assert ids1.isdisjoint(ids2), "分页结果不应有重叠"
+
 
 class TestGetStats:
     """测试 get_stats() — 获取平台统计。"""
@@ -53,43 +76,67 @@ class TestGetStats:
 
     async def test_get_stats_has_fields(self, tester_client):
         result = await tester_client.get_stats()
-        # 应该包含一些统计字段
         assert len(result) > 0
 
 
+class TestGetActiveAgents:
+    """测试 get_active_agents() — 获取活跃 Agent 列表。"""
+
+    async def test_get_active_agents(self, tester_client):
+        result = await tester_client.get_active_agents()
+        assert isinstance(result, dict)
+
+
 class TestSearch:
-    """测试 search() — 搜索帖子。"""
+    """测试 search() — POST 搜索，支持 type 参数。"""
 
     async def test_search_posts(self, tester_client, searchable_post):
         """搜索刚创建的帖子。"""
-        import asyncio
-        # 等待索引更新
         await asyncio.sleep(1)
-
         result = await tester_client.search(q="XiaLiaoSearchTest", limit=10)
         assert isinstance(result, dict)
 
     async def test_search_returns_results(self, tester_client, searchable_post):
         """搜索应返回结果。"""
-        import asyncio
         await asyncio.sleep(1)
-
         result = await tester_client.search(q="自动化测试", limit=5)
         assert isinstance(result, dict)
 
     async def test_search_no_results(self, tester_client):
-        """搜索不存在的关键词（语义搜索会返回相似结果）。"""
+        """搜索不存在的关键词。"""
         result = await tester_client.search(q="zzz_nonexistent_keyword_99999", limit=5)
         assert isinstance(result, dict)
-        # 后端使用语义搜索（向量相似度），即使关键词不存在也会返回语义相关的结果
-        # 验证返回格式正确，如果是语义搜索应该有 similarity 字段
         results = result.get("results", result.get("posts", []))
         assert isinstance(results, list)
-        # 如果有结果且是语义搜索，应该包含 similarity 相似度分数
         if results and result.get("search_mode") == "semantic":
             assert "similarity" in results[0], "语义搜索结果应包含 similarity 字段"
 
-    async def test_search_with_type(self, tester_client):
-        """带 type 参数搜索。"""
+    async def test_search_type_posts(self, tester_client):
+        """搜索类型: posts。"""
         result = await tester_client.search(q="测试", type="posts", limit=5)
+        assert isinstance(result, dict)
+
+    async def test_search_type_comments(self, tester_client):
+        """搜索类型: comments。"""
+        result = await tester_client.search(q="测试", type="comments", limit=5)
+        assert isinstance(result, dict)
+
+    async def test_search_type_agents(self, tester_client):
+        """搜索类型: agents — 搜索 Agent。"""
+        result = await tester_client.search(q="测试", type="agents", limit=5)
+        assert isinstance(result, dict)
+
+    async def test_search_type_circles(self, tester_client):
+        """搜索类型: circles — 搜索圈子。"""
+        result = await tester_client.search(q="闲聊", type="circles", limit=5)
+        assert isinstance(result, dict)
+
+    async def test_search_type_all(self, tester_client):
+        """搜索类型: all — 全局搜索。"""
+        result = await tester_client.search(q="AI", type="all", limit=10)
+        assert isinstance(result, dict)
+
+    async def test_search_default_type_is_all(self, tester_client):
+        """不指定 type 时默认搜索全部。"""
+        result = await tester_client.search(q="AI", limit=5)
         assert isinstance(result, dict)

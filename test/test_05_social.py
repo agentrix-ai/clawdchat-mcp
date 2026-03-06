@@ -4,6 +4,9 @@
 - follow()
 - unfollow()
 - get_agent_posts()
+- get_followers()
+- get_following()
+- get_active_agents()
 
 主测试虾 ↔ 被测虾 之间的社交互动。
 """
@@ -106,3 +109,40 @@ class TestGetAgentPosts:
         """查看不存在的 Agent 的帖子应该报错。"""
         with pytest.raises(ClawdChatAPIError):
             await tester_client.get_agent_posts("不存在的Agent_xyz_99999")
+
+
+class TestGetFollowers:
+    """测试 get_followers() — 获取 Agent 的粉丝列表。"""
+
+    async def test_get_followers(self, tester_client, target_info):
+        """查看被测虾的粉丝列表。"""
+        result = await tester_client.get_followers(target_info["name"])
+        assert isinstance(result, dict)
+
+    async def test_get_own_followers(self, tester_client, tester_info):
+        """查看自己的粉丝列表。"""
+        result = await tester_client.get_followers(tester_info["name"])
+        assert isinstance(result, dict)
+
+
+class TestGetFollowing:
+    """测试 get_following() — 获取 Agent 的关注列表。"""
+
+    async def test_get_following(self, tester_client, target_info):
+        """查看被测虾的关注列表。"""
+        result = await tester_client.get_following(target_info["name"])
+        assert isinstance(result, dict)
+
+    async def test_get_own_following(self, tester_client, tester_info):
+        """查看自己的关注列表。"""
+        result = await tester_client.get_following(tester_info["name"])
+        assert isinstance(result, dict)
+
+
+class TestGetActiveAgents:
+    """测试 get_active_agents() — 获取活跃 Agent 列表。"""
+
+    async def test_get_active_agents(self, tester_client):
+        """获取平台上的活跃 Agent。"""
+        result = await tester_client.get_active_agents()
+        assert isinstance(result, dict)

@@ -28,7 +28,7 @@ async def test_circle_name():
 
 
 class TestListCircles:
-    """测试 list_circles() — 列出所有圈子（支持分页）。"""
+    """测试 list_circles() — 列出所有圈子（支持分页、排序、过滤）。"""
 
     async def test_list_circles_returns_data(self, tester_client):
         result = await tester_client.list_circles()
@@ -53,6 +53,12 @@ class TestListCircles:
             assert "slug" in circle, "圈子应有 slug（URL 标识符）字段"
             assert "display_name" not in circle, "圈子不应暴露 display_name 字段"
 
+    async def test_list_circles_sort_recommended(self, tester_client):
+        """综合推荐排序（默认）。"""
+        result = await tester_client.list_circles(sort="recommended", limit=5)
+        assert isinstance(result, dict)
+        assert "circles" in result
+
     async def test_list_circles_sort_new(self, tester_client):
         """按创建时间排序。"""
         result = await tester_client.list_circles(sort="new", limit=5)
@@ -63,6 +69,17 @@ class TestListCircles:
         """按活跃度排序。"""
         result = await tester_client.list_circles(sort="active", limit=5)
         assert isinstance(result, dict)
+
+    async def test_list_circles_sort_hot(self, tester_client):
+        """按订阅数排序。"""
+        result = await tester_client.list_circles(sort="hot", limit=5)
+        assert isinstance(result, dict)
+
+    async def test_list_circles_filter_subscribed(self, tester_client):
+        """筛选已订阅的圈子。"""
+        result = await tester_client.list_circles(filter="subscribed")
+        assert isinstance(result, dict)
+        assert "circles" in result
 
     async def test_list_circles_pagination_page1(self, tester_client):
         """分页测试：第一页。"""
@@ -172,6 +189,29 @@ class TestCreateCircle:
                 name=test_circle_name,
                 description="",
             )
+
+
+class TestUpdateCircle:
+    """测试 update_circle() — 更新圈子信息。"""
+
+    async def test_update_circle_description(self, tester_client, test_circle_name):
+        """更新测试圈子的描述。"""
+        try:
+            await tester_client.get_circle(test_circle_name)
+        except ClawdChatAPIError:
+            pytest.skip(f"圈子 '{test_circle_name}' 不存在")
+
+        result = await tester_client.update_circle(
+            test_circle_name,
+            {"description": "自动化测试更新的描述"},
+        )
+        assert isinstance(result, dict)
+
+        # 恢复原描述
+        await tester_client.update_circle(
+            test_circle_name,
+            {"description": "这是自动化测试创建的圈子，可以安全删除。"},
+        )
 
 
 class TestSubscribeCircle:
