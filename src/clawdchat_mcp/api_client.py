@@ -209,6 +209,9 @@ class ClawdChatAgentClient:
     async def get_post(self, post_id: str) -> dict[str, Any]:
         return await self._request("GET", f"/api/v1/posts/{post_id}")
 
+    async def edit_post(self, post_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("PATCH", f"/api/v1/posts/{post_id}", json=data)
+
     async def delete_post(self, post_id: str) -> dict[str, Any]:
         return await self._request("DELETE", f"/api/v1/posts/{post_id}")
 
@@ -221,11 +224,11 @@ class ClawdChatAgentClient:
     async def bookmark_post(self, post_id: str) -> dict[str, Any]:
         return await self._request("POST", f"/api/v1/posts/{post_id}/bookmark")
 
-    # ---- Images ----
+    # ---- Files (unified upload: images/audio/video) ----
 
-    async def upload_image(self, file_content: bytes, filename: str, content_type: str) -> dict[str, Any]:
+    async def upload_file(self, file_content: bytes, filename: str, content_type: str) -> dict[str, Any]:
         return await self._request(
-            "POST", "/api/v1/images/upload",
+            "POST", "/api/v1/files/upload",
             files={"file": (filename, file_content, content_type)},
         )
 
@@ -433,6 +436,77 @@ class ClawdChatAgentClient:
 
     async def dm_delete_conversation(self, conversation_id: str) -> dict[str, Any]:
         return await self.a2a_delete_conversation(conversation_id)
+
+    # ---- Avatar ----
+
+    async def upload_avatar(self, file_content: bytes, filename: str, content_type: str) -> dict[str, Any]:
+        return await self._request(
+            "POST", "/api/v1/agents/me/avatar",
+            files={"file": (filename, file_content, content_type)},
+        )
+
+    async def delete_avatar(self) -> dict[str, Any]:
+        return await self._request("DELETE", "/api/v1/agents/me/avatar")
+
+    # ---- Tools (MCP tool gateway) ----
+
+    async def tools_search(
+        self,
+        q: Optional[str] = None,
+        category: Optional[str] = None,
+        mode: str = "hybrid",
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"mode": mode, "limit": limit}
+        if q:
+            params["q"] = q
+        if category:
+            params["category"] = category
+        return await self._request("GET", "/api/v1/tools/search", params=params)
+
+    async def tools_search_servers(
+        self,
+        q: Optional[str] = None,
+        category: Optional[str] = None,
+        mode: str = "hybrid",
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"mode": mode}
+        if q:
+            params["q"] = q
+        if category:
+            params["category"] = category
+        return await self._request("GET", "/api/v1/tools/servers", params=params)
+
+    async def tools_categories(self) -> dict[str, Any]:
+        return await self._request("GET", "/api/v1/tools/categories")
+
+    async def tools_call(
+        self,
+        server: str,
+        tool: str,
+        arguments: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"server": server, "tool": tool}
+        if arguments:
+            body["arguments"] = arguments
+        return await self._request("POST", "/api/v1/tools/call", json=body)
+
+    async def tools_rate(
+        self,
+        server_name: str,
+        rating: float,
+        comment: Optional[str] = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"server_name": server_name, "rating": rating}
+        if comment:
+            body["comment"] = comment
+        return await self._request("POST", "/api/v1/tools/rate", json=body)
+
+    async def tools_connect(self, server: str) -> dict[str, Any]:
+        return await self._request("POST", "/api/v1/tools/connect", json={"server": server})
+
+    async def tools_credits(self) -> dict[str, Any]:
+        return await self._request("GET", "/api/v1/tools/credits")
 
     # ---- Rate Limit (dev only) ----
 
