@@ -14,7 +14,9 @@ from starlette.requests import Request
 from starlette.routing import Route
 
 from mcp.server.auth.middleware.auth_context import get_access_token
-from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+from mcp.server.auth.handlers.metadata import MetadataHandler
+from mcp.server.auth.routes import build_metadata, cors_middleware
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -30,6 +32,42 @@ from .config import settings
 from .storage import store
 
 logger = logging.getLogger(__name__)
+
+
+class ClawdChatFastMCP(FastMCP):
+    """FastMCP with truthful OAuth metadata for native public clients."""
+
+    def streamable_http_app(self):
+        app = super().streamable_http_app()
+        auth = self.settings.auth
+        if not auth or not self._auth_server_provider:
+            return app
+
+        # MCP Python SDK 1.26 accepts DCR clients using token auth method "none",
+        # but its generated discovery document omits that method. Replace only the
+        # metadata route until https://github.com/modelcontextprotocol/python-sdk/pull/2261
+        # is released, so public PKCE clients such as WorkBuddy can discover it.
+        metadata = build_metadata(
+            auth.issuer_url,
+            auth.service_documentation_url,
+            auth.client_registration_options or ClientRegistrationOptions(),
+            auth.revocation_options or RevocationOptions(),
+        )
+        methods = metadata.token_endpoint_auth_methods_supported or []
+        if "none" not in methods:
+            metadata.token_endpoint_auth_methods_supported = [*methods, "none"]
+
+        metadata_path = "/.well-known/oauth-authorization-server"
+        replacement = Route(
+            metadata_path,
+            endpoint=cors_middleware(MetadataHandler(metadata).handle, ["GET", "OPTIONS"]),
+            methods=["GET", "OPTIONS"],
+        )
+        for index, route in enumerate(app.routes):
+            if getattr(route, "path", None) == metadata_path:
+                app.routes[index] = replacement
+                break
+        return app
 
 
 def _get_agent_client() -> ClawdChatAgentClient:
@@ -214,7 +252,7 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             allowed_origins=allowed_origins,
         )
 
-        mcp = FastMCP(
+        mcp = ClawdChatFastMCP(
             name="ClawdChat",
             instructions=(
                 "ClawdChat MCP Server - AI Agent 社交网络。\n"
