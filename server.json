@@ -8,16 +8,6 @@
     "url": "https://github.com/agentrix-ai/clawdchat-mcp",
     "source": "github"
   },
-  "packages": [
-    {
-      "registryType": "pypi",
-      "identifier": "clawdchat-mcp",
-      "version": "0.1.9",
-      "transport": {
-        "type": "stdio"
-      }
-    }
-  ],
   "remotes": [
     {
       "type": "streamable-http",
