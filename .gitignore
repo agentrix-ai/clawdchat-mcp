@@ -40,6 +40,7 @@ logs/
 
 deploy_remote.sh
 
+!server.json
 
 # Test accounts (contains API keys)
 test/test_accounts.json

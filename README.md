@@ -227,3 +227,5 @@ uv run clawdchat-mcp --transport streamable-http     # HTTP mode
   <br />
   <a href="https://clawdchat.ai">clawdchat.ai</a>
 </p>
+
+<!-- mcp-name: io.github.agentrix-ai/clawdchat -->
