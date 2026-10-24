@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 from urllib.parse import urlparse
 
@@ -11,7 +10,6 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 from .config import settings
 
-PACKAGE_NAME = "clawdchat-mcp"
 SERVER_NAME = "ClawdChat"
 SERVER_TITLE = "ClawdChat – Social Network for AI Agents"
 SERVER_DESCRIPTION = (
@@ -28,10 +26,9 @@ PRODUCTION_RESOURCE_BY_HOST = {
 
 
 def package_version() -> str:
-    try:
-        return version(PACKAGE_NAME)
-    except PackageNotFoundError:
-        return "0.1.10"
+    from . import __version__
+
+    return __version__
 
 
 def _hostname(host_header: str | None) -> str:

@@ -33,7 +33,7 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken as OAuthToken
 
 from .oauth_redirect import AllowlistedOAuthClient
 
-from .api_client import ClawdChatAPIError, ClawdChatUserClient
+from .api_client import ClawdChatAPIError, ClawdChatClient, ClawdChatUserClient
 from .config import settings
 from .storage import (
     AccessTokenData,
@@ -282,26 +282,146 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
 # ---- HTTP handlers for login/agent-selection pages ----
 
 
-async def login_page_handler(request: Request) -> Response:
-    """GET /auth/login - Redirect to ClawdChat for authentication.
-
-    Builds the ClawdChat external auth URL and redirects the user there.
-    ClawdChat handles all login methods (Google, Phone, etc.) and redirects
-    back to /auth/clawdchat/callback with a one-time code.
-    """
-    state = request.query_params.get("state", "")
-    if not state or not store.get_pending_login(state):
-        return HTMLResponse("<h1>Invalid or expired login session</h1>", status_code=400)
-
-    # Build ClawdChat external auth URL
+def _build_clawdchat_auth_url(state: str) -> str:
+    """Build the original ClawdChat account-login authorize URL."""
     callback_url = f"{settings.mcp_server_url}/auth/clawdchat/callback"
     params = urlencode({
         "callback_url": callback_url,
         "state": state,
     })
-    clawdchat_auth_url = f"{settings.clawdchat_api_url}/api/v1/auth/external/authorize?{params}"
+    return f"{settings.clawdchat_api_url}/api/v1/auth/external/authorize?{params}"
 
-    return RedirectResponse(url=clawdchat_auth_url, status_code=302)
+
+def _is_json_login_request(request: Request) -> bool:
+    content_type = (request.headers.get("content-type") or "").lower()
+    accept = (request.headers.get("accept") or "").lower()
+    return "application/json" in content_type or "application/json" in accept
+
+
+def _render_login_page(state: str, error: str | None = None) -> HTMLResponse:
+    template = jinja_env.get_template("login.html")
+    html = template.render(
+        state=state,
+        clawdchat_auth_url=_build_clawdchat_auth_url(state),
+        error=error,
+    )
+    return HTMLResponse(html, status_code=400 if error else 200)
+
+
+def _login_error_response(
+    wants_json: bool,
+    message: str,
+    *,
+    state: str = "",
+    pending: PendingLogin | None = None,
+) -> Response:
+    if wants_json:
+        return JSONResponse({"error": message}, status_code=400)
+    if pending is not None and state:
+        return _render_login_page(state, error=message)
+    return HTMLResponse(f"<h1>{message}</h1>", status_code=400)
+
+
+async def _read_login_credentials(request: Request) -> tuple[str, str]:
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("JSON body must be an object")
+        return str(body.get("state") or "").strip(), str(body.get("api_key") or "").strip()
+
+    form = await request.form()
+    return str(form.get("state") or "").strip(), str(form.get("api_key") or "").strip()
+
+
+async def login_page_handler(request: Request) -> Response:
+    """GET /auth/login — bilingual dual-channel login page.
+
+    Channel A keeps the original ClawdChat account authorize URL
+    (Google / phone). Channel B posts an Agent API Key to POST /auth/login.
+    """
+    state = request.query_params.get("state", "")
+    if not state or not store.get_pending_login(state):
+        return HTMLResponse("<h1>Invalid or expired login session</h1>", status_code=400)
+
+    return _render_login_page(state)
+
+
+async def login_submit_handler(request: Request) -> Response:
+    """POST /auth/login — authorize directly with an Agent API Key.
+
+    Accepts application/x-www-form-urlencoded and application/json.
+    Form submissions 302 to the client; JSON requests return {"redirect": ...}.
+    """
+    wants_json = _is_json_login_request(request)
+    try:
+        state, api_key = await _read_login_credentials(request)
+    except Exception:
+        return _login_error_response(wants_json, "Invalid request body")
+
+    if not state:
+        return _login_error_response(wants_json, "缺少 state 参数")
+
+    pending = store.get_pending_login(state)
+    if not pending:
+        return _login_error_response(wants_json, "登录会话已过期或无效", state=state)
+
+    if not api_key:
+        return _login_error_response(
+            wants_json, "请输入 Agent API Key", state=state, pending=pending
+        )
+
+    try:
+        client = ClawdChatClient(settings.clawdchat_api_url, api_key)
+        profile = await client.get_my_profile()
+    except ClawdChatAPIError as e:
+        logger.error(f"API Key login failed: {e}")
+        return _login_error_response(
+            wants_json, f"API Key 验证失败: {e.detail}", state=state, pending=pending
+        )
+    except Exception as e:
+        logger.exception("API Key login error")
+        return _login_error_response(
+            wants_json, f"API Key 验证失败: {e}", state=state, pending=pending
+        )
+
+    if not isinstance(profile, dict):
+        return _login_error_response(
+            wants_json, "未能从 API Key 获取有效的 Agent 资料", state=state, pending=pending
+        )
+
+    agent_id = profile.get("id") or profile.get("agent_id")
+    agent_name = profile.get("name") or profile.get("agent_name") or ""
+    if not agent_id:
+        return _login_error_response(
+            wants_json, "未能从 API Key 获取有效的 Agent ID", state=state, pending=pending
+        )
+
+    code = store.generate_code()
+    store.store_auth_code(AuthCodeData(
+        code=code,
+        client_id=pending.client_id,
+        redirect_uri=pending.redirect_uri,
+        redirect_uri_provided_explicitly=pending.redirect_uri_provided_explicitly,
+        code_challenge=pending.code_challenge,
+        scopes=pending.scopes,
+        expires_at=time.time() + AUTH_CODE_EXPIRY,
+        agent_api_key=api_key,
+        agent_id=str(agent_id),
+        agent_name=str(agent_name),
+        user_jwt="",
+        resource=pending.resource,
+    ))
+    store.consume_pending_login(state)
+
+    redirect_uri = construct_redirect_uri(
+        pending.redirect_uri, code=code, state=pending.oauth_state or None
+    )
+    logger.info(f"API Key authorization complete for agent '{agent_name}'")
+
+    if wants_json:
+        return JSONResponse({"redirect": redirect_uri})
+    return RedirectResponse(url=redirect_uri, status_code=302)
 
 
 async def clawdchat_callback_handler(request: Request) -> Response:

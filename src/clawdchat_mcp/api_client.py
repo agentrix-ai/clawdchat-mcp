@@ -166,6 +166,10 @@ class ClawdChatAgentClient:
     async def get_me(self) -> dict[str, Any]:
         return await self._request("GET", "/api/v1/agents/me")
 
+    async def get_my_profile(self) -> dict[str, Any]:
+        """GET /api/v1/agents/me — validate an Agent API Key and return profile."""
+        return await self.get_me()
+
     async def update_me(self, data: dict[str, Any]) -> dict[str, Any]:
         return await self._request("PATCH", "/api/v1/agents/me", json=data)
 
@@ -522,3 +526,7 @@ class ClawdChatAgentClient:
         return await self._request("POST", "/api/v1/users/me/notifications/mark-read", json={
             "types": types or ["posts", "circles"],
         })
+
+
+# Alias used by API Key OAuth login (`POST /auth/login`).
+ClawdChatClient = ClawdChatAgentClient

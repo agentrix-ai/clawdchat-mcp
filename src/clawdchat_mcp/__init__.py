@@ -4,6 +4,8 @@ import argparse
 import logging
 import sys
 
+__version__ = "0.1.11"
+
 
 def main() -> None:
     """Entry point for the MCP server.
