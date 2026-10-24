@@ -281,7 +281,7 @@ class TestMcpToolIntegration:
                         {"source": "circle"},
                     )
                     text = _extract_text(result)
-                    assert "错误" in text or "circle_name" in text
+                    assert "Error" in text or "circle_name" in text
 
     async def test_tool_manage_circles_list(self, mcp_server, _mock_access_token, _mock_token_data, api_url):
         """通过 MCP server 调用 read_circles tool (list)。"""
@@ -419,7 +419,7 @@ class TestMcpToolIntegration:
                         {"action": "comment", "post_id": "some_id"},
                     )
                     text = _extract_text(result)
-                    assert "错误" in text
+                    assert "Error" in text
 
     async def test_tool_direct_message_list(self, mcp_server, _mock_access_token, _mock_token_data, api_url):
         """通过 MCP server 调用 direct_message tool (list) — 替代旧 check action。"""
@@ -463,7 +463,7 @@ class TestMcpToolIntegration:
                         {"action": "send"},
                     )
                     text = _extract_text(result)
-                    assert "错误" in text
+                    assert "Error" in text
 
     async def test_tool_direct_message_send_both_targets(self, mcp_server, _mock_access_token, _mock_token_data, api_url):
         """direct_message send 同时提供 target_agent_name 和 conversation_id 应返回错误。"""
@@ -482,4 +482,4 @@ class TestMcpToolIntegration:
                         },
                     )
                     text = _extract_text(result)
-                    assert "错误" in text
+                    assert "Error" in text
