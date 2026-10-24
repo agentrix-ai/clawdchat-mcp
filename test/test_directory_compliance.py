@@ -328,7 +328,7 @@ def test_server_card_and_openai_challenge() -> None:
             card = card_resp.json()
             assert card["serverInfo"]["name"] == "ClawdChat"
             assert card["serverInfo"]["title"]
-            assert card["serverInfo"]["version"] == "0.1.11"
+            assert card["serverInfo"]["version"] == "0.1.12"
             assert card["serverInfo"]["websiteUrl"]
             assert card["serverInfo"]["icons"]
             assert card["authentication"]["type"] == "oauth2"
@@ -362,14 +362,14 @@ def test_openai_challenge_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.body.decode() == "openai-challenge-fixture"
 
 
-EXPECTED_VERSION = "0.1.11"
+EXPECTED_VERSION = "0.1.12"
 TEST_API_KEY = "clawdchat_test_key_123"
 TEST_AGENT_ID = "agent-reviewer-1"
 TEST_AGENT_NAME = "ReviewerAgent"
 TEST_PROFILE = {"id": TEST_AGENT_ID, "name": TEST_AGENT_NAME}
 
 
-def test_version_is_0_1_11() -> None:
+def test_version_is_0_1_12() -> None:
     root = Path(__file__).resolve().parent.parent
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     server_meta = json.loads((root / "server.json").read_text(encoding="utf-8"))
@@ -468,11 +468,103 @@ def test_login_page_renders_dual_channel_html() -> None:
             assert 'name="state"' in html
             assert 'method="POST"' in html
             assert 'action="/auth/login"' in html
-            assert "使用 ClawdChat 账号登录" in html
-            assert "Sign in with ClawdChat Account" in html
+            assert "Continue with Google (ClawdChat Account)" in html
+            assert "Or connect directly with Agent API Key (clawdchat_...)" in html
             assert "Authorize Agent" in html
+            assert "Phone" not in html
+            assert "手机号" not in html
 
     asyncio.run(_run())
+
+
+def test_login_page_ai_host_is_english_without_phone() -> None:
+    async def _run() -> None:
+        app = _http_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as client:
+            _client_id, _verifier, login_url = await _register_and_start_login(client)
+            page = await client.get(login_url, headers={"Host": "mcp.clawdchat.ai"})
+            assert page.status_code == 200
+            html = page.text
+            assert "Continue with Google (ClawdChat Account)" in html
+            assert "Or connect directly with Agent API Key (clawdchat_...)" in html
+            assert "Authorize Agent" in html
+            assert "Phone" not in html
+            assert "手机号" not in html
+            assert not any("\u4e00" <= ch <= "\u9fff" for ch in html)
+
+            failing = AsyncMock(side_effect=ClawdChatAPIError(401, "invalid api key"))
+            login_state = _query(login_url)["state"]
+            with patch("clawdchat_mcp.auth_provider.ClawdChatClient.get_my_profile", failing):
+                bad = await client.post(
+                    "/auth/login",
+                    data={"state": login_state, "api_key": "clawdchat_test_key_bad"},
+                    headers={"Host": "mcp.clawdchat.ai"},
+                    follow_redirects=False,
+                )
+            assert bad.status_code == 400
+            assert "API Key verification failed" in bad.text
+            assert "Phone" not in bad.text
+            assert "手机号" not in bad.text
+            assert not any("\u4e00" <= ch <= "\u9fff" for ch in bad.text)
+
+    asyncio.run(_run())
+
+
+def test_login_page_cn_host_keeps_phone_copy() -> None:
+    async def _run() -> None:
+        app = _http_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as client:
+            _client_id, _verifier, login_url = await _register_and_start_login(client)
+            page = await client.get(login_url, headers={"Host": "mcp.clawdchat.cn"})
+            assert page.status_code == 200
+            html = page.text
+            assert "使用虾聊账号登录（手机号 / Google）" in html
+            assert "或使用 Agent API Key 直接授权" in html
+            assert "授权连接" in html
+
+    asyncio.run(_run())
+
+
+def test_is_cn_site_host_and_local_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    from starlette.requests import Request
+
+    from clawdchat_mcp.auth_provider import LoginSiteCopy, is_cn_site
+
+    def _request(headers: dict[str, str]) -> Request:
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/auth/login",
+            "raw_path": b"/auth/login",
+            "query_string": b"",
+            "headers": [
+                (key.lower().encode("latin-1"), value.encode("latin-1"))
+                for key, value in headers.items()
+            ],
+            "client": ("127.0.0.1", 1234),
+            "server": ("localhost", 8347),
+        }
+        return Request(scope)
+
+    assert is_cn_site(_request({"host": "mcp.clawdchat.ai"})) is False
+    assert is_cn_site(_request({"host": "mcp.clawdchat.cn"})) is True
+    assert is_cn_site(_request({
+        "host": "localhost:8347",
+        "x-forwarded-host": "mcp.clawdchat.cn",
+    })) is True
+    assert is_cn_site(_request({"host": "localhost:8347"})) is False
+
+    monkeypatch.setattr(
+        "clawdchat_mcp.auth_provider.settings.clawdchat_api_url",
+        "https://clawdchat.cn",
+    )
+    assert LoginSiteCopy.is_cn(_request({"host": "testserver"})) is True
+    assert LoginSiteCopy.is_cn(_request({"host": "mcp.clawdchat.ai"})) is False
 
 
 def test_post_auth_login_form_json_and_invalid_key() -> None:
