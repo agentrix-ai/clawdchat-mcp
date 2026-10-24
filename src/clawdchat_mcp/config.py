@@ -23,10 +23,17 @@ class Settings(BaseSettings):
     mcp_server_port: int = 8347
     mcp_server_url: str = "http://localhost:8347"
 
+    # OpenAI Apps / Plugins directory domain-verification challenge token.
+    # Served as text/plain at GET /.well-known/openai-apps-challenge
+    openai_apps_challenge_token: str = ""
+
     @property
     def mcp_endpoint(self) -> str:
-        """Full MCP endpoint URL."""
-        return f"{self.mcp_server_url}/mcp"
+        """Full MCP endpoint URL (resource identifier). Never the site root."""
+        base = self.mcp_server_url.rstrip("/")
+        if base.endswith("/mcp"):
+            return base
+        return f"{base}/mcp"
 
 
 settings = Settings()
