@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import json
+import secrets
+from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
 
+from clawdchat_mcp import __version__
+from clawdchat_mcp.api_client import ClawdChatAPIError
 from clawdchat_mcp.oauth_redirect import (
     CLAUDE_CALLBACK_URIS,
     CHATGPT_PLATFORM_REDIRECT,
@@ -319,7 +328,7 @@ def test_server_card_and_openai_challenge() -> None:
             card = card_resp.json()
             assert card["serverInfo"]["name"] == "ClawdChat"
             assert card["serverInfo"]["title"]
-            assert card["serverInfo"]["version"]
+            assert card["serverInfo"]["version"] == "0.1.11"
             assert card["serverInfo"]["websiteUrl"]
             assert card["serverInfo"]["icons"]
             assert card["authentication"]["type"] == "oauth2"
@@ -351,3 +360,257 @@ def test_openai_challenge_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     response = openai_apps_challenge_response()
     assert response.status_code == 200
     assert response.body.decode() == "openai-challenge-fixture"
+
+
+EXPECTED_VERSION = "0.1.11"
+TEST_API_KEY = "clawdchat_test_key_123"
+TEST_AGENT_ID = "agent-reviewer-1"
+TEST_AGENT_NAME = "ReviewerAgent"
+TEST_PROFILE = {"id": TEST_AGENT_ID, "name": TEST_AGENT_NAME}
+
+
+def test_version_is_0_1_11() -> None:
+    root = Path(__file__).resolve().parent.parent
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    server_meta = json.loads((root / "server.json").read_text(encoding="utf-8"))
+    glama = json.loads((root / "glama.json").read_text(encoding="utf-8"))
+
+    assert __version__ == EXPECTED_VERSION
+    assert f'version = "{EXPECTED_VERSION}"' in pyproject
+    assert server_meta["version"] == EXPECTED_VERSION
+    assert glama["maintainers"] == ["xray918", "lxyd-ai"]
+    assert glama["$schema"] == "https://glama.ai/mcp/schemas/server.json"
+
+
+def _pkce() -> tuple[str, str]:
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    return verifier, challenge
+
+
+def _query(url: str) -> dict[str, str]:
+    return {key: values[0] for key, values in parse_qs(urlparse(url).query).items()}
+
+
+def _tool_payload(result: Any) -> dict[str, Any]:
+    if isinstance(result, tuple) and result:
+        structured = result[1] if len(result) > 1 else None
+        if isinstance(structured, dict) and isinstance(structured.get("result"), str):
+            return json.loads(structured["result"])
+        result = result[0]
+    if isinstance(result, dict):
+        return result
+    texts: list[str] = []
+    if isinstance(result, list):
+        for block in result:
+            text = getattr(block, "text", None)
+            if text:
+                texts.append(text)
+    raw = "\n".join(texts) if texts else str(result)
+    return json.loads(raw)
+
+
+async def _register_and_start_login(
+    client: httpx.AsyncClient,
+    *,
+    redirect_uri: str = "http://localhost:9876/callback",
+    oauth_state: str = "reviewer-oauth-state",
+) -> tuple[str, str, str]:
+    verifier, challenge = _pkce()
+    registered = await client.post(
+        "/register",
+        json={
+            "redirect_uris": [redirect_uri],
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none",
+            "client_name": "api-key-login-test",
+        },
+    )
+    assert registered.status_code == 201, registered.text
+    client_id = registered.json()["client_id"]
+
+    authorize = await client.get(
+        "/authorize",
+        params={
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "state": oauth_state,
+        },
+        follow_redirects=False,
+    )
+    assert authorize.status_code in (302, 303), authorize.text
+    login_url = authorize.headers["location"]
+    assert "/auth/login" in login_url
+    return client_id, verifier, login_url
+
+
+def test_login_page_renders_dual_channel_html() -> None:
+    async def _run() -> None:
+        app = _http_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as client:
+            invalid = await client.get("/auth/login")
+            assert invalid.status_code == 400
+
+            expired = await client.get("/auth/login", params={"state": "missing-or-expired"})
+            assert expired.status_code == 400
+
+            _client_id, _verifier, login_url = await _register_and_start_login(client)
+            page = await client.get(login_url)
+            assert page.status_code == 200
+            html = page.text
+            assert "/api/v1/auth/external/authorize" in html
+            assert 'name="api_key"' in html
+            assert 'name="state"' in html
+            assert 'method="POST"' in html
+            assert 'action="/auth/login"' in html
+            assert "使用 ClawdChat 账号登录" in html
+            assert "Sign in with ClawdChat Account" in html
+            assert "Authorize Agent" in html
+
+    asyncio.run(_run())
+
+
+def test_post_auth_login_form_json_and_invalid_key() -> None:
+    async def _run() -> None:
+        app = _http_app()
+        transport = httpx.ASGITransport(app=app)
+        profile = AsyncMock(return_value=TEST_PROFILE)
+
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as client:
+            _client_id, _verifier, login_url = await _register_and_start_login(
+                client, oauth_state="form-oauth-state"
+            )
+            login_state = _query(login_url)["state"]
+
+            with patch("clawdchat_mcp.auth_provider.ClawdChatClient.get_my_profile", profile):
+                form_resp = await client.post(
+                    "/auth/login",
+                    data={"state": login_state, "api_key": TEST_API_KEY},
+                    follow_redirects=False,
+                )
+            assert form_resp.status_code == 302, form_resp.text
+            location = form_resp.headers["location"]
+            query = _query(location)
+            assert query.get("code")
+            assert query.get("state") == "form-oauth-state"
+            assert location.startswith("http://localhost:9876/callback")
+
+            _client_id, _verifier, login_url = await _register_and_start_login(
+                client, oauth_state="json-oauth-state"
+            )
+            login_state = _query(login_url)["state"]
+            with patch("clawdchat_mcp.auth_provider.ClawdChatClient.get_my_profile", profile):
+                json_resp = await client.post(
+                    "/auth/login",
+                    json={"state": login_state, "api_key": f"  {TEST_API_KEY}  "},
+                    headers={"Accept": "application/json"},
+                )
+            assert json_resp.status_code == 200, json_resp.text
+            body = json_resp.json()
+            assert "redirect" in body
+            query = _query(body["redirect"])
+            assert query.get("code")
+            assert query.get("state") == "json-oauth-state"
+
+            _client_id, _verifier, login_url = await _register_and_start_login(client)
+            login_state = _query(login_url)["state"]
+            failing = AsyncMock(side_effect=ClawdChatAPIError(401, "invalid api key"))
+            with patch("clawdchat_mcp.auth_provider.ClawdChatClient.get_my_profile", failing):
+                bad_form = await client.post(
+                    "/auth/login",
+                    data={"state": login_state, "api_key": "clawdchat_test_key_bad"},
+                    follow_redirects=False,
+                )
+                bad_json = await client.post(
+                    "/auth/login",
+                    json={"state": login_state, "api_key": "clawdchat_test_key_bad"},
+                    headers={"Accept": "application/json"},
+                )
+            assert bad_form.status_code == 400
+            assert "API Key" in bad_form.text or "验证失败" in bad_form.text
+            assert bad_json.status_code == 400
+            assert "error" in bad_json.json()
+
+            missing_pending = await client.post(
+                "/auth/login",
+                json={"state": "not-a-pending-state", "api_key": TEST_API_KEY},
+            )
+            assert missing_pending.status_code == 400
+            assert "error" in missing_pending.json()
+
+    asyncio.run(_run())
+
+
+def test_api_key_oauth_session_lists_and_switch_rules(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _run() -> None:
+        from mcp.server.auth.provider import AccessToken
+
+        from clawdchat_mcp import server as server_mod
+
+        mcp = create_mcp_server(transport="streamable-http")
+        app = mcp.streamable_http_app()
+        transport = httpx.ASGITransport(app=app)
+        profile = AsyncMock(return_value=TEST_PROFILE)
+
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as client:
+            client_id, verifier, login_url = await _register_and_start_login(
+                client, oauth_state="token-oauth-state"
+            )
+            login_state = _query(login_url)["state"]
+            with patch("clawdchat_mcp.auth_provider.ClawdChatClient.get_my_profile", profile):
+                issued = await client.post(
+                    "/auth/login",
+                    data={"state": login_state, "api_key": TEST_API_KEY},
+                    follow_redirects=False,
+                )
+            assert issued.status_code == 302, issued.text
+            code = _query(issued.headers["location"])["code"]
+
+            token_resp = await client.post(
+                "/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": "http://localhost:9876/callback",
+                    "client_id": client_id,
+                    "code_verifier": verifier,
+                },
+            )
+            assert token_resp.status_code == 200, token_resp.text
+            access_token = token_resp.json()["access_token"]
+
+        monkeypatch.setattr(
+            server_mod,
+            "get_access_token",
+            lambda: AccessToken(token=access_token, client_id=client_id, scopes=["agent"]),
+        )
+
+        listed = _tool_payload(await mcp.call_tool("list_my_agents", {"action": "list"}))
+        assert listed["total"] == 1
+        assert listed["agents"][0]["id"] == TEST_AGENT_ID
+        assert listed["agents"][0]["name"] == TEST_AGENT_NAME
+        assert listed["agents"][0]["is_current"] is True
+
+        same = _tool_payload(await mcp.call_tool(
+            "switch_agent", {"action": "switch", "agent_id": TEST_AGENT_ID}
+        ))
+        assert same["success"] is True
+        assert TEST_AGENT_NAME in same["message"]
+
+        same_by_name = _tool_payload(await mcp.call_tool(
+            "switch_agent", {"action": "switch", "agent_id": TEST_AGENT_NAME}
+        ))
+        assert same_by_name["success"] is True
+
+        other = _tool_payload(await mcp.call_tool(
+            "switch_agent", {"action": "switch", "agent_id": "other-agent-id"}
+        ))
+        assert other.get("success") is False
+        assert "单个 Agent API Key 直接授权" in other["message"]
+
+    asyncio.run(_run())

@@ -3,7 +3,7 @@
   "name": "io.github.agentrix-ai/clawdchat",
   "title": "ClawdChat – Social Network for AI Agents",
   "description": "ClawdChat: social network for AI agents – post, comment, follow and DM via MCP.",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "repository": {
     "url": "https://github.com/agentrix-ai/clawdchat-mcp",
     "source": "github"

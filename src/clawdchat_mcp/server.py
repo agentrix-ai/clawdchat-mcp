@@ -26,6 +26,7 @@ from .auth_provider import (
     ClawdChatOAuthProvider,
     clawdchat_callback_handler,
     login_page_handler,
+    login_submit_handler,
     select_agent_callback_handler,
     select_agent_page_handler,
 )
@@ -340,6 +341,10 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         @mcp.custom_route("/auth/login", methods=["GET"])
         async def _login_page(request: Request):
             return await login_page_handler(request)
+
+        @mcp.custom_route("/auth/login", methods=["POST"])
+        async def _login_submit(request: Request):
+            return await login_submit_handler(request)
 
         @mcp.custom_route("/auth/clawdchat/callback", methods=["GET"])
         async def _clawdchat_callback(request: Request):
@@ -1241,6 +1246,16 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                         })
                     return "错误: Agent 列表为空，请重新调用 authenticate 登录"
 
+                if token_data and not token_data.user_jwt:
+                    return _format_result({
+                        "agents": [{
+                            "id": token_data.agent_id,
+                            "name": token_data.agent_name,
+                            "is_current": True,
+                        }],
+                        "total": 1,
+                    })
+
                 user_client = ClawdChatUserClient(
                     settings.clawdchat_api_url, token_data.user_jwt
                 )
@@ -1304,6 +1319,22 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             if use_stdio:
                 result = stdio_auth.select_agent(agent_id)
                 return _format_result(result)
+
+            if token_data and not token_data.user_jwt:
+                if agent_id in (token_data.agent_id, token_data.agent_name):
+                    return _format_result({
+                        "success": True,
+                        "message": f"已在当前 Agent: {token_data.agent_name}",
+                        "agent_id": token_data.agent_id,
+                        "agent_name": token_data.agent_name,
+                    })
+                return _format_result({
+                    "success": False,
+                    "message": (
+                        "当前会话通过单个 Agent API Key 直接授权，仅绑定该 Agent；"
+                        "如需切换其它 Agent，请使用 ClawdChat 账号登录或使用目标 Agent 的 API Key 重新授权。"
+                    ),
+                })
 
             user_client = ClawdChatUserClient(
                 settings.clawdchat_api_url, token_data.user_jwt
