@@ -31,6 +31,8 @@ from mcp.server.auth.provider import (
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken as OAuthTokenType
 
+from .oauth_redirect import AllowlistedOAuthClient
+
 from .api_client import ClawdChatAPIError, ClawdChatUserClient
 from .config import settings
 from .storage import (
@@ -61,12 +63,12 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
     def __init__(self, store: TokenStore):
         self.store = store
 
-    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+    async def get_client(self, client_id: str) -> AllowlistedOAuthClient | None:
         """Retrieve registered client by ID."""
         data = self.store.get_client(client_id)
         if not data:
             return None
-        return OAuthClientInformationFull(
+        return AllowlistedOAuthClient(
             client_id=data.client_id,
             client_secret=data.client_secret,
             client_id_issued_at=data.client_id_issued_at,

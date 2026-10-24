@@ -108,12 +108,19 @@ def target_info(accounts) -> dict:
 # ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture(scope="session", autouse=True)
-async def _clear_rate_limits_before_session(accounts):
-    """测试会话开始前，自动清除两个 Agent 的限流计数。"""
-    api_url = os.environ.get("CLAWDCHAT_API_URL", accounts.get("api_url", "http://localhost:8081"))
+async def _clear_rate_limits_before_session():
+    """测试会话开始前，若存在测试账号则清除两个 Agent 的限流计数。
+
+    不依赖 accounts fixture，避免合规/元数据等离线测试因缺少
+    test_accounts.json 被整会话 skip。
+    """
+    if not ACCOUNTS_FILE.exists():
+        return
+    data = json.loads(ACCOUNTS_FILE.read_text())
+    api_url = os.environ.get("CLAWDCHAT_API_URL", data.get("api_url", "http://localhost:8081"))
     api_keys = [
-        accounts["tester"]["api_key"],
-        accounts["target"]["api_key"],
+        data["tester"]["api_key"],
+        data["target"]["api_key"],
     ]
     await _clear_rate_limits(api_url, api_keys)
     print("[SETUP] 限流计数已清除")
