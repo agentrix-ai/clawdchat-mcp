@@ -31,7 +31,7 @@ def _extract_error(response: httpx.Response) -> str:
             if detail.get("hint"):
                 parts.append(detail["hint"])
             if detail.get("claim_url"):
-                parts.append(f"认领链接: {detail['claim_url']}")
+                parts.append(f"Claim URL: {detail['claim_url']}")
             return " | ".join(parts) if parts else str(detail)
         return detail or data.get("error") or str(data)
     except Exception:

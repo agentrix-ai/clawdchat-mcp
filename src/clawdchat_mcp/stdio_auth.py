@@ -303,7 +303,7 @@ class StdioAuthManager:
 
                 if not code:
                     self._send_html(_build_result_page("认证失败", "缺少必要参数", error=True))
-                    manager._error = "回调缺少 code 参数"
+                    manager._error = "Callback is missing the code parameter"
                     manager._auth_complete.set()
                     return
 
@@ -394,12 +394,12 @@ class StdioAuthManager:
             timeout=10.0,
         )
         if r.status_code != 200:
-            raise RuntimeError(f"获取令牌失败: {r.text}")
+            raise RuntimeError(f"Failed to obtain token: {r.text}")
 
         data = r.json()
         self.jwt = data.get("jwt", "")
         if not self.jwt:
-            raise RuntimeError("服务器未返回 JWT")
+            raise RuntimeError("Server did not return a JWT")
 
         # 2. Fetch user's agents
         r = httpx.get(
@@ -408,11 +408,11 @@ class StdioAuthManager:
             timeout=10.0,
         )
         if r.status_code != 200:
-            raise RuntimeError(f"获取 Agent 列表失败: {r.text}")
+            raise RuntimeError(f"Failed to fetch agent list: {r.text}")
 
         self.agents = r.json().get("agents", [])
         if not self.agents:
-            raise RuntimeError("你还没有认领任何 Agent，请先在 ClawdChat 认领一个 Agent")
+            raise RuntimeError("No claimed agents found. Claim an agent on ClawdChat first.")
 
         # 3. Auto-select if single agent
         if len(self.agents) == 1:
@@ -432,7 +432,7 @@ class StdioAuthManager:
             timeout=10.0,
         )
         if r.status_code != 200:
-            raise RuntimeError(f"获取凭证失败: {r.text}")
+            raise RuntimeError(f"Failed to fetch credentials: {r.text}")
 
         api_key = r.json().get("api_key")
 
@@ -444,11 +444,11 @@ class StdioAuthManager:
                 timeout=10.0,
             )
             if r.status_code != 200:
-                raise RuntimeError(f"重置 API Key 失败: {r.text}")
+                raise RuntimeError(f"Failed to reset API key: {r.text}")
             api_key = r.json().get("api_key")
 
         if not api_key:
-            raise RuntimeError(f"无法获取 Agent「{agent_name}」的 API Key")
+            raise RuntimeError(f"Unable to obtain an API key for agent '{agent_name}'")
 
         self.api_key = api_key
         self.agent_id = agent_id
@@ -459,13 +459,13 @@ class StdioAuthManager:
         """Select an agent from the list (called from browser page or authenticate tool)."""
         agent = next((a for a in self.agents if a["id"] == agent_id), None)
         if not agent:
-            return {"error": f"Agent ID '{agent_id}' 不在你的 Agent 列表中"}
+            return {"error": f"Agent ID '{agent_id}' is not in the owned agent list"}
 
         try:
             self._select_agent_sync(agent_id, agent.get("name", ""))
             return {
                 "status": "authenticated",
-                "message": f"已选择 Agent「{self.agent_name}」，现在可以使用其他工具了",
+                "message": f"Selected agent '{self.agent_name}'",
                 "agent_id": self.agent_id,
                 "agent_name": self.agent_name,
             }
@@ -483,7 +483,7 @@ class StdioAuthManager:
         elif self.needs_agent_selection:
             return {
                 "status": "needs_selection",
-                "message": "登录成功，你有多个 Agent，请选择要使用的 Agent",
+                "message": "Sign-in succeeded; select an agent to continue",
                 "agents": [
                     {"id": a["id"], "name": a.get("name", "")}
                     for a in self.agents
@@ -492,7 +492,7 @@ class StdioAuthManager:
         elif self._error:
             return {"status": "error", "error": self._error}
         elif self._auth_complete.is_set():
-            return {"status": "error", "error": "认证异常，请重新调用 authenticate 登录"}
+            return {"status": "error", "error": "Sign-in failed; start a new sign-in flow"}
         else:
             return {"status": "not_authenticated"}
 

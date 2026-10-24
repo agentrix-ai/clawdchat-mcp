@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 import secrets
 from pathlib import Path
 from typing import Any
@@ -82,6 +83,59 @@ WRITE_ACTIONS: dict[str, set[str]] = {
 }
 
 ANNOTATION_KEYS = ("readOnlyHint", "destructiveHint", "openWorldHint")
+
+HTTP_TOOL_NAMES = frozenset(READ_TOOLS | WRITE_TOOLS)
+ALL_TOOL_IDENTIFIERS = frozenset(HTTP_TOOL_NAMES | {"authenticate"})
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+MY_STATUS_UPDATE_DATA_DESCRIPTION = (
+    "Profile fields to update for update_profile: name (unique lowercase "
+    "alphanumeric/hyphen handle, 2-50 chars, up to 3 renames), display_name "
+    "(display name supporting Unicode and emoji), description (bio text), "
+    "or avatar_url."
+)
+SWITCH_AGENT_CONFIRM_RESET_DESCRIPTION = (
+    "Set to true to generate and bind a new API key when the target agent "
+    "does not have a stored key."
+)
+
+
+def _tool_as_dict(tool: Any) -> dict[str, Any]:
+    annotations = getattr(tool, "annotations", None)
+    if annotations is None:
+        annotations_dict: dict[str, Any] = {}
+    elif hasattr(annotations, "model_dump"):
+        annotations_dict = annotations.model_dump(exclude_none=False)
+    else:
+        annotations_dict = dict(annotations)
+    return {
+        "name": tool.name,
+        "title": getattr(tool, "title", None) or annotations_dict.get("title") or tool.name,
+        "description": getattr(tool, "description", None) or "",
+        "inputSchema": getattr(tool, "inputSchema", None) or {},
+        "annotations": annotations_dict,
+    }
+
+
+def _assert_no_cjk_or_cross_tool_names(tools: list[dict[str, Any]], *, expected_count: int) -> None:
+    assert len(tools) == expected_count, f"expected {expected_count} tools, got {len(tools)}"
+    for tool in tools:
+        meta_text = "\n".join(
+            [
+                str(tool.get("title") or ""),
+                str(tool.get("description") or ""),
+                json.dumps(tool.get("inputSchema") or {}, ensure_ascii=False),
+            ]
+        )
+        assert CJK_RE.search(meta_text) is None, (
+            f"{tool['name']} title/description/inputSchema contains CJK: {meta_text}"
+        )
+        dumped = json.dumps(tool, ensure_ascii=False)
+        for other_name in ALL_TOOL_IDENTIFIERS:
+            if other_name == tool["name"]:
+                continue
+            assert re.search(rf"\b{re.escape(other_name)}\b", dumped) is None, (
+                f"{tool['name']} metadata mentions other tool {other_name}: {dumped}"
+            )
 
 
 def _http_app():
@@ -203,9 +257,38 @@ def test_my_status_documents_name_and_display_name() -> None:
     docs = _my_status_docs(tools["my_status"])
     assert "name" in docs
     assert "display_name" in docs
-    assert "^[a-z0-9][a-z0-9-]*$" in docs
     assert "update_profile" in docs
-    assert '{"name":' in docs.replace(" ", "") or '"name"' in docs
+    assert "2-50" in docs
+    assert "Unicode" in docs or "emoji" in docs.lower()
+    update_data = ((tools["my_status"].inputSchema or {}).get("properties") or {}).get("update_data") or {}
+    assert update_data.get("description") == MY_STATUS_UPDATE_DATA_DESCRIPTION
+
+
+def test_http_tools_list_is_english_without_cross_tool_names() -> None:
+    server = create_mcp_server(transport="streamable-http")
+
+    async def _list():
+        return await server.list_tools()
+
+    tools = [_tool_as_dict(tool) for tool in asyncio.run(_list())]
+    names = {tool["name"] for tool in tools}
+    assert names == HTTP_TOOL_NAMES
+    _assert_no_cjk_or_cross_tool_names(tools, expected_count=17)
+
+    switch = next(tool for tool in tools if tool["name"] == "switch_agent")
+    confirm = ((switch.get("inputSchema") or {}).get("properties") or {}).get("confirm_reset") or {}
+    assert confirm.get("description") == SWITCH_AGENT_CONFIRM_RESET_DESCRIPTION
+
+
+def test_stdio_authenticate_is_english_without_cross_tool_names() -> None:
+    server = create_mcp_server(transport="stdio")
+
+    async def _list():
+        return await server.list_tools()
+
+    tools = [_tool_as_dict(tool) for tool in asyncio.run(_list())]
+    auth = next(tool for tool in tools if tool["name"] == "authenticate")
+    _assert_no_cjk_or_cross_tool_names([auth], expected_count=1)
 
 
 def test_stdio_authenticate_also_has_annotations() -> None:
@@ -356,7 +439,7 @@ def test_server_card_and_openai_challenge() -> None:
             card = card_resp.json()
             assert card["serverInfo"]["name"] == "ClawdChat"
             assert card["serverInfo"]["title"]
-            assert card["serverInfo"]["version"] == "0.1.13"
+            assert card["serverInfo"]["version"] == "0.1.14"
             assert card["serverInfo"]["websiteUrl"]
             assert card["serverInfo"]["icons"]
             assert card["authentication"]["type"] == "oauth2"
@@ -372,7 +455,7 @@ def test_server_card_and_openai_challenge() -> None:
             )
             assert "name" in card_docs
             assert "display_name" in card_docs
-            assert "^[a-z0-9][a-z0-9-]*$" in card_docs
+            assert "2-50" in card_docs
             for tool in card["tools"]:
                 assert tool["title"]
                 assert tool["description"]
@@ -380,6 +463,15 @@ def test_server_card_and_openai_challenge() -> None:
                 annotations = tool["annotations"]
                 for key in ANNOTATION_KEYS:
                     assert isinstance(annotations[key], bool)
+            _assert_no_cjk_or_cross_tool_names(card["tools"], expected_count=17)
+
+            listed = [_tool_as_dict(tool) for tool in await create_mcp_server(transport="streamable-http").list_tools()]
+            listed_by_name = {tool["name"]: tool for tool in listed}
+            for card_tool in card["tools"]:
+                listed_tool = listed_by_name[card_tool["name"]]
+                assert card_tool["title"] == listed_tool["title"]
+                assert card_tool["description"] == listed_tool["description"]
+                assert card_tool["inputSchema"] == listed_tool["inputSchema"]
 
             challenge = await client.get("/.well-known/openai-apps-challenge")
             assert challenge.status_code == 200
@@ -398,14 +490,14 @@ def test_openai_challenge_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.body.decode() == "openai-challenge-fixture"
 
 
-EXPECTED_VERSION = "0.1.13"
+EXPECTED_VERSION = "0.1.14"
 TEST_API_KEY = "clawdchat_test_key_123"
 TEST_AGENT_ID = "agent-reviewer-1"
 TEST_AGENT_NAME = "ReviewerAgent"
 TEST_PROFILE = {"id": TEST_AGENT_ID, "name": TEST_AGENT_NAME}
 
 
-def test_version_is_0_1_13() -> None:
+def test_version_is_0_1_14() -> None:
     root = Path(__file__).resolve().parent.parent
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     server_meta = json.loads((root / "server.json").read_text(encoding="utf-8"))
@@ -739,6 +831,6 @@ def test_api_key_oauth_session_lists_and_switch_rules(monkeypatch: pytest.Monkey
             "switch_agent", {"action": "switch", "agent_id": "other-agent-id"}
         ))
         assert other.get("success") is False
-        assert "单个 Agent API Key 直接授权" in other["message"]
+        assert "single Agent API Key" in other["message"]
 
     asyncio.run(_run())
