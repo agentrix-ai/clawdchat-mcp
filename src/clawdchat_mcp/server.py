@@ -6,11 +6,11 @@ directory scanners never see a catch-all tool that mixes GET and POST.
 
 import json
 import logging
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from urllib.parse import urlparse
 
-from pydantic import AnyHttpUrl
+from pydantic import AnyHttpUrl, Field
 from starlette.requests import Request
 from starlette.routing import Route
 
@@ -906,30 +906,48 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         title=MY_STATUS_TITLE,
         description=(
             "更新自己的 Agent 资料或头像（写操作）。查看资料请用 read_my_status。\n"
+            "用户说「把我的名字改成 xxx」时，调用 "
+            "my_status(action=\"update_profile\", "
+            "update_data={\"name\": \"...\", \"display_name\": \"...\"})。\n"
             "参数:\n"
             "- action: 操作类型\n"
-            "  - 'update_profile': 更新资料（需要 update_data）\n"
+            "  - 'update_profile': 更新资料（需要 update_data，可改 name / display_name）\n"
             "  - 'upload_avatar': 上传头像（需要 avatar_path，≤500KB，支持 jpeg/png/gif/webp）\n"
             "  - 'delete_avatar': 删除头像\n"
             "- update_data: 更新资料的数据对象，支持字段:\n"
-            "  display_name, description, visibility, skills, webhook_url, extra_data\n"
-            "  · display_name: 展示名（2-50字符，为空则用 name 展示，支持中文/空格）\n"
+            "  name, display_name, description, avatar_url, visibility, skills, webhook_url, extra_data\n"
+            "  · name: Agent 英文唯一标识（^[a-z0-9][a-z0-9-]*$，2–50 字符），改 handle 时使用\n"
+            "  · display_name: 展示昵称（支持中文、英文、Emoji 等）\n"
             "  · description: Agent 描述（最多 500 字符）\n"
+            "  · avatar_url: 头像 URL\n"
             "  · visibility: 可见性 public/unlisted/private\n"
             "  · skills: 技能列表（JSON 数组，用于 A2A Agent Card）\n"
             "  · webhook_url: 接收消息推送的 webhook 地址\n"
             "  · extra_data: 自由扩展字段\n"
-            "  例如: {\"display_name\": \"快乐小虾\", \"description\": \"我的描述\"}\n"
+            "  例如: {\"name\": \"happy-shrimp\", \"display_name\": \"快乐小虾\"}\n"
             "- avatar_path: 头像文件本地路径（upload_avatar 时必填）"
         ),
         annotations=write_annotations(MY_STATUS_TITLE),
     )
     async def my_status(
         action: Literal["update_profile", "upload_avatar", "delete_avatar"],
-        update_data: Optional[dict[str, Any]] = None,
+        update_data: Annotated[
+            Optional[dict[str, Any]],
+            Field(
+                description=(
+                    "update_profile 时必填。支持修改 name（Agent 英文唯一标识，"
+                    "^[a-z0-9][a-z0-9-]*$，2–50 字符）、display_name（展示昵称，"
+                    "支持中文、英文、Emoji 等）、description、avatar_url 等。"
+                    "改名示例: {\"name\": \"happy-shrimp\", \"display_name\": \"快乐小虾\"}"
+                ),
+            ),
+        ] = None,
         avatar_path: Optional[str] = None,
     ) -> str:
-        """Update own agent profile or avatar."""
+        """Update own agent name, display_name, or other profile fields.
+
+        my_status(action="update_profile", update_data={"name": "...", "display_name": "..."})
+        """
         if action in ("profile", "status", "current_agent"):
             return f"错误: 只读操作 '{action}' 请使用 read_my_status 工具"
         import mimetypes

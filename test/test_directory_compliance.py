@@ -180,6 +180,34 @@ def test_read_and_write_actions_are_fully_separated() -> None:
         assert _action_enum(tools[read_name]).isdisjoint(_action_enum(tools[write_name]))
 
 
+def _my_status_docs(tool) -> str:
+    schema = tool.inputSchema or {}
+    props = schema.get("properties") or {}
+    update_data = props.get("update_data") or {}
+    return "\n".join(
+        [
+            tool.description or "",
+            json.dumps(update_data, ensure_ascii=False),
+            str(update_data.get("description") or ""),
+        ]
+    )
+
+
+def test_my_status_documents_name_and_display_name() -> None:
+    server = create_mcp_server(transport="streamable-http")
+
+    async def _list():
+        return await server.list_tools()
+
+    tools = {tool.name: tool for tool in asyncio.run(_list())}
+    docs = _my_status_docs(tools["my_status"])
+    assert "name" in docs
+    assert "display_name" in docs
+    assert "^[a-z0-9][a-z0-9-]*$" in docs
+    assert "update_profile" in docs
+    assert '{"name":' in docs.replace(" ", "") or '"name"' in docs
+
+
 def test_stdio_authenticate_also_has_annotations() -> None:
     server = create_mcp_server(transport="stdio")
 
@@ -328,7 +356,7 @@ def test_server_card_and_openai_challenge() -> None:
             card = card_resp.json()
             assert card["serverInfo"]["name"] == "ClawdChat"
             assert card["serverInfo"]["title"]
-            assert card["serverInfo"]["version"] == "0.1.12"
+            assert card["serverInfo"]["version"] == "0.1.13"
             assert card["serverInfo"]["websiteUrl"]
             assert card["serverInfo"]["icons"]
             assert card["authentication"]["type"] == "oauth2"
@@ -337,6 +365,14 @@ def test_server_card_and_openai_challenge() -> None:
             names = {tool["name"] for tool in card["tools"]}
             assert READ_TOOLS <= names
             assert WRITE_TOOLS <= names
+            my_status = next(tool for tool in card["tools"] if tool["name"] == "my_status")
+            card_docs = (my_status.get("description") or "") + json.dumps(
+                (my_status.get("inputSchema") or {}).get("properties", {}).get("update_data") or {},
+                ensure_ascii=False,
+            )
+            assert "name" in card_docs
+            assert "display_name" in card_docs
+            assert "^[a-z0-9][a-z0-9-]*$" in card_docs
             for tool in card["tools"]:
                 assert tool["title"]
                 assert tool["description"]
@@ -362,14 +398,14 @@ def test_openai_challenge_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.body.decode() == "openai-challenge-fixture"
 
 
-EXPECTED_VERSION = "0.1.12"
+EXPECTED_VERSION = "0.1.13"
 TEST_API_KEY = "clawdchat_test_key_123"
 TEST_AGENT_ID = "agent-reviewer-1"
 TEST_AGENT_NAME = "ReviewerAgent"
 TEST_PROFILE = {"id": TEST_AGENT_ID, "name": TEST_AGENT_NAME}
 
 
-def test_version_is_0_1_12() -> None:
+def test_version_is_0_1_13() -> None:
     root = Path(__file__).resolve().parent.parent
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     server_meta = json.loads((root / "server.json").read_text(encoding="utf-8"))
