@@ -5,7 +5,7 @@ Handles the OAuth 2.1 flow with PKCE, delegating user authentication
 to the ClawdChat backend via its external auth (IdP) endpoint.
 
 Authentication flow:
-  MCP Client -> MCP Server -> ClawdChat (Google/Phone) -> MCP Server -> MCP Client
+  MCP Client -> MCP Server -> ClawdChat (Google on .ai; phone/Google on .cn) -> MCP Server -> MCP Client
 """
 
 import json as _json
@@ -282,6 +282,63 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
 # ---- HTTP handlers for login/agent-selection pages ----
 
 
+class LoginSiteCopy:
+    """`.ai` is English-only (no Phone); `.cn` keeps bilingual phone/Google copy."""
+
+    _LOCAL_TEST_HOSTS = frozenset({"testserver", "localhost", "127.0.0.1", "::1"})
+    _ERRORS = {
+        "invalid_body": ("Invalid request body", "Invalid request body"),
+        "missing_state": ("Missing state parameter", "缺少 state 参数"),
+        "expired": ("Login session expired or invalid", "登录会话已过期或无效"),
+        "missing_key": ("Please enter an Agent API Key", "请输入 Agent API Key"),
+        "verify_failed": (
+            "API Key verification failed: {detail}",
+            "API Key 验证失败: {detail}",
+        ),
+        "invalid_profile": (
+            "Could not load a valid Agent profile from this API Key",
+            "未能从 API Key 获取有效的 Agent 资料",
+        ),
+        "invalid_agent_id": (
+            "Could not load a valid Agent ID from this API Key",
+            "未能从 API Key 获取有效的 Agent ID",
+        ),
+    }
+
+    @classmethod
+    def host_header(cls, request: Request) -> str:
+        raw = (
+            request.headers.get("x-forwarded-host")
+            or request.headers.get("host")
+            or ""
+        )
+        return raw.split(",")[0].strip().lower()
+
+    @classmethod
+    def is_cn(cls, request: Request) -> bool:
+        """True only for the .cn site (or local tests configured against .cn)."""
+        host = cls.host_header(request)
+        if "clawdchat.cn" in host:
+            return True
+        hostname = host.split(":")[0].strip("[]")
+        if not host or hostname in cls._LOCAL_TEST_HOSTS:
+            return (
+                "clawdchat.cn" in settings.clawdchat_api_url.lower()
+                or "clawdchat.cn" in settings.mcp_server_url.lower()
+            )
+        return False
+
+    @classmethod
+    def error(cls, is_cn: bool, key: str, **kwargs: str) -> str:
+        en, zh = cls._ERRORS[key]
+        return (zh if is_cn else en).format(**kwargs)
+
+
+def is_cn_site(request: Request) -> bool:
+    """Public wrapper used by login handlers and unit tests."""
+    return LoginSiteCopy.is_cn(request)
+
+
 def _build_clawdchat_auth_url(state: str) -> str:
     """Build the original ClawdChat account-login authorize URL."""
     callback_url = f"{settings.mcp_server_url}/auth/clawdchat/callback"
@@ -298,17 +355,21 @@ def _is_json_login_request(request: Request) -> bool:
     return "application/json" in content_type or "application/json" in accept
 
 
-def _render_login_page(state: str, error: str | None = None) -> HTMLResponse:
+def _render_login_page(
+    request: Request, state: str, error: str | None = None
+) -> HTMLResponse:
     template = jinja_env.get_template("login.html")
     html = template.render(
         state=state,
         clawdchat_auth_url=_build_clawdchat_auth_url(state),
         error=error,
+        is_cn=is_cn_site(request),
     )
     return HTMLResponse(html, status_code=400 if error else 200)
 
 
 def _login_error_response(
+    request: Request,
     wants_json: bool,
     message: str,
     *,
@@ -318,7 +379,7 @@ def _login_error_response(
     if wants_json:
         return JSONResponse({"error": message}, status_code=400)
     if pending is not None and state:
-        return _render_login_page(state, error=message)
+        return _render_login_page(request, state, error=message)
     return HTMLResponse(f"<h1>{message}</h1>", status_code=400)
 
 
@@ -335,16 +396,16 @@ async def _read_login_credentials(request: Request) -> tuple[str, str]:
 
 
 async def login_page_handler(request: Request) -> Response:
-    """GET /auth/login — bilingual dual-channel login page.
+    """GET /auth/login — dual-channel login page (.ai English / .cn bilingual).
 
-    Channel A keeps the original ClawdChat account authorize URL
-    (Google / phone). Channel B posts an Agent API Key to POST /auth/login.
+    Channel A redirects to ClawdChat account authorize (Google on .ai;
+    phone / Google on .cn). Channel B posts an Agent API Key.
     """
     state = request.query_params.get("state", "")
     if not state or not store.get_pending_login(state):
         return HTMLResponse("<h1>Invalid or expired login session</h1>", status_code=400)
 
-    return _render_login_page(state)
+    return _render_login_page(request, state)
 
 
 async def login_submit_handler(request: Request) -> Response:
@@ -352,23 +413,35 @@ async def login_submit_handler(request: Request) -> Response:
 
     Accepts application/x-www-form-urlencoded and application/json.
     Form submissions 302 to the client; JSON requests return {"redirect": ...}.
+    Error HTML is re-rendered with the same .ai / .cn copy as GET.
     """
     wants_json = _is_json_login_request(request)
+    is_cn = is_cn_site(request)
     try:
         state, api_key = await _read_login_credentials(request)
     except Exception:
-        return _login_error_response(wants_json, "Invalid request body")
+        return _login_error_response(
+            request, wants_json, LoginSiteCopy.error(is_cn, "invalid_body")
+        )
 
     if not state:
-        return _login_error_response(wants_json, "缺少 state 参数")
+        return _login_error_response(
+            request, wants_json, LoginSiteCopy.error(is_cn, "missing_state")
+        )
 
     pending = store.get_pending_login(state)
     if not pending:
-        return _login_error_response(wants_json, "登录会话已过期或无效", state=state)
+        return _login_error_response(
+            request, wants_json, LoginSiteCopy.error(is_cn, "expired"), state=state
+        )
 
     if not api_key:
         return _login_error_response(
-            wants_json, "请输入 Agent API Key", state=state, pending=pending
+            request,
+            wants_json,
+            LoginSiteCopy.error(is_cn, "missing_key"),
+            state=state,
+            pending=pending,
         )
 
     try:
@@ -377,24 +450,40 @@ async def login_submit_handler(request: Request) -> Response:
     except ClawdChatAPIError as e:
         logger.error(f"API Key login failed: {e}")
         return _login_error_response(
-            wants_json, f"API Key 验证失败: {e.detail}", state=state, pending=pending
+            request,
+            wants_json,
+            LoginSiteCopy.error(is_cn, "verify_failed", detail=e.detail),
+            state=state,
+            pending=pending,
         )
     except Exception as e:
         logger.exception("API Key login error")
         return _login_error_response(
-            wants_json, f"API Key 验证失败: {e}", state=state, pending=pending
+            request,
+            wants_json,
+            LoginSiteCopy.error(is_cn, "verify_failed", detail=str(e)),
+            state=state,
+            pending=pending,
         )
 
     if not isinstance(profile, dict):
         return _login_error_response(
-            wants_json, "未能从 API Key 获取有效的 Agent 资料", state=state, pending=pending
+            request,
+            wants_json,
+            LoginSiteCopy.error(is_cn, "invalid_profile"),
+            state=state,
+            pending=pending,
         )
 
     agent_id = profile.get("id") or profile.get("agent_id")
     agent_name = profile.get("name") or profile.get("agent_name") or ""
     if not agent_id:
         return _login_error_response(
-            wants_json, "未能从 API Key 获取有效的 Agent ID", state=state, pending=pending
+            request,
+            wants_json,
+            LoginSiteCopy.error(is_cn, "invalid_agent_id"),
+            state=state,
+            pending=pending,
         )
 
     code = store.generate_code()
