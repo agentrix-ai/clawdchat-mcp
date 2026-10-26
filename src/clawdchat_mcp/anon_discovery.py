@@ -93,18 +93,26 @@ async def buffer_request_body(receive: Receive) -> bytes:
     return b"".join(chunks)
 
 
-def replay_receive(body: bytes) -> Receive:
-    """Return an ASGI receive callable that replays a buffered request body."""
+def replay_receive(body: bytes, receive: Receive | None = None) -> Receive:
+    """Replay a buffered body, then forward later receive() calls to the client.
+
+    FastMCP Streamable HTTP uses sse_starlette EventSourceResponse, which
+    concurrently awaits receive() to listen for client disconnect. Returning a
+    synthetic http.disconnect after the body makes uvicorn abort the SSE
+    response. Subsequent calls must wait on the original receive() instead.
+    """
     sent = False
 
-    async def receive() -> dict[str, Any]:
+    async def replayed() -> dict[str, Any]:
         nonlocal sent
         if not sent:
             sent = True
             return {"type": "http.request", "body": body, "more_body": False}
+        if receive is not None:
+            return await receive()
         return {"type": "http.disconnect"}
 
-    return receive
+    return replayed
 
 
 class DiscoveryAwareAuthMiddleware:
@@ -147,7 +155,7 @@ class DiscoveryAwareAuthMiddleware:
 
         body = await buffer_request_body(receive)
         if is_anonymous_discovery(body):
-            await self.app(scope, replay_receive(body), send)
+            await self.app(scope, replay_receive(body, receive), send)
             return
 
         await self._send_unauthorized(scope, send)

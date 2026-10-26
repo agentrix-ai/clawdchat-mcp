@@ -14,9 +14,10 @@ from pydantic import AnyHttpUrl, Field
 from starlette.requests import Request
 from starlette.routing import Route
 
-from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.middleware.auth_context import get_access_token as _sdk_get_access_token
 from mcp.server.auth.handlers.metadata import MetadataHandler
 from mcp.server.auth.middleware.bearer_auth import RequireAuthMiddleware
+from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.routes import REGISTRATION_PATH, build_metadata, cors_middleware
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.fastmcp import FastMCP
@@ -178,6 +179,33 @@ class ClawdChatFastMCP(FastMCP):
         else:
             app.routes.append(robots_route)
         return app
+
+
+def get_access_token() -> AccessToken | None:
+    """Resolve the current Bearer token, including upgraded anonymous sessions.
+
+    Streamable HTTP starts `run_server` on the first initialize. An anonymous
+    initialize leaves `auth_context_var` as None in that long-lived task.
+    Later Bearer-authenticated requests set the user on the Starlette Request
+    that FastMCP injects into `request_ctx`, which this fallback reads.
+    """
+    token = _sdk_get_access_token()
+    if token is not None:
+        return token
+    try:
+        from mcp.server.lowlevel.server import request_ctx
+
+        ctx = request_ctx.get()
+        req = getattr(ctx, "request", None)
+        scope = getattr(req, "scope", None)
+        if isinstance(scope, dict):
+            user = scope.get("user")
+            access_token = getattr(user, "access_token", None)
+            if isinstance(access_token, AccessToken):
+                return access_token
+    except LookupError:
+        pass
+    return None
 
 
 def _get_agent_client() -> ClawdChatAgentClient:

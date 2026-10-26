@@ -1147,3 +1147,141 @@ def test_public_discovery_aliases_and_robots_txt() -> None:
             assert "Allow: /" in text
 
     asyncio.run(_run())
+
+
+def test_replay_receive_delegates_followup_to_original_receive() -> None:
+    from clawdchat_mcp.anon_discovery import replay_receive
+
+    async def _run() -> None:
+        calls = {"n": 0}
+
+        async def orig_receive() -> dict[str, Any]:
+            calls["n"] += 1
+            return {"type": "http.disconnect", "from": "orig"}
+
+        receive = replay_receive(b'{"jsonrpc":"2.0","method":"initialize","id":1}', orig_receive)
+        first = await receive()
+        assert first["type"] == "http.request"
+        assert first["more_body"] is False
+        assert first["body"].startswith(b'{"jsonrpc"')
+        second = await receive()
+        assert second == {"type": "http.disconnect", "from": "orig"}
+        assert calls["n"] == 1
+        third = await receive()
+        assert third == {"type": "http.disconnect", "from": "orig"}
+        assert calls["n"] == 2
+
+    asyncio.run(_run())
+
+
+def test_anonymous_session_upgraded_tools_call_uses_bearer_token() -> None:
+    """Anonymous initialize + later Bearer tools/call must see the access token."""
+
+    async def _run() -> None:
+        from mcp.server.auth.provider import AccessToken
+
+        from clawdchat_mcp import server as server_mod
+
+        mcp = create_mcp_server(transport="streamable-http")
+        app = mcp.streamable_http_app()
+        mcp.session_manager.json_response = True
+        seen: list[AccessToken | None] = []
+        real_get = server_mod.get_access_token
+
+        def _spy_get_access_token() -> AccessToken | None:
+            token = real_get()
+            seen.append(token)
+            return token
+
+        server_mod.get_access_token = _spy_get_access_token  # type: ignore[method-assign]
+        profile = AsyncMock(return_value=TEST_PROFILE)
+        try:
+            async with mcp.session_manager.run():
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as client:
+                    client_id, verifier, login_url = await _register_and_start_login(
+                        client, oauth_state="upgrade-oauth-state"
+                    )
+                    login_state = _query(login_url)["state"]
+                    with patch("clawdchat_mcp.auth_provider.ClawdChatClient.get_my_profile", profile):
+                        issued = await client.post(
+                            "/auth/login",
+                            data={"state": login_state, "api_key": TEST_API_KEY},
+                            follow_redirects=False,
+                        )
+                    assert issued.status_code == 302, issued.text
+                    code = _query(issued.headers["location"])["code"]
+                    token_resp = await client.post(
+                        "/token",
+                        data={
+                            "grant_type": "authorization_code",
+                            "code": code,
+                            "redirect_uri": "http://localhost:9876/callback",
+                            "client_id": client_id,
+                            "code_verifier": verifier,
+                        },
+                    )
+                    assert token_resp.status_code == 200, token_resp.text
+                    access_token = token_resp.json()["access_token"]
+
+                init_status, init_headers, _ = await _asgi_post(
+                    app,
+                    "/mcp",
+                    _mcp_jsonrpc(
+                        "initialize",
+                        params={
+                            "protocolVersion": "2025-03-26",
+                            "capabilities": {},
+                            "clientInfo": {"name": "directory-crawler", "version": "1.0"},
+                        },
+                    ),
+                )
+                assert init_status == 200
+                session_id = init_headers.get("mcp-session-id")
+                assert session_id
+
+                initialized_status, _, _ = await _asgi_post(
+                    app,
+                    "/mcp",
+                    _mcp_jsonrpc("notifications/initialized", rpc_id=None),
+                    headers={"mcp-session-id": session_id},
+                )
+                assert initialized_status in (200, 202)
+
+                seen.clear()
+                call_status, call_headers, call_body = await _asgi_post(
+                    app,
+                    "/mcp",
+                    _mcp_jsonrpc(
+                        "tools/call",
+                        params={"name": "list_my_agents", "arguments": {"action": "list"}},
+                    ),
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "mcp-session-id": session_id,
+                    },
+                )
+                assert call_status == 200, call_body
+                payload = _parse_sse_or_json(call_body, call_headers.get("content-type", ""))
+                assert payload is not None
+                assert payload.get("error") is None
+                result = payload.get("result") or {}
+                assert result.get("isError") is not True
+                texts = [
+                    block.get("text", "")
+                    for block in (result.get("content") or [])
+                    if isinstance(block, dict)
+                ]
+                joined = "\n".join(texts)
+                assert "not signed in" not in joined.lower()
+                assert "Open this URL" not in joined
+                assert TEST_AGENT_ID in joined
+                assert TEST_AGENT_NAME in joined
+                assert seen, "list_my_agents must call get_access_token()"
+                token_obj = next((item for item in seen if item is not None), None)
+                assert token_obj is not None
+                assert token_obj.token == access_token
+        finally:
+            server_mod.get_access_token = real_get  # type: ignore[method-assign]
+
+    asyncio.run(_run())
