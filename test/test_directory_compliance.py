@@ -8,6 +8,7 @@ import hashlib
 import json
 import re
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -439,7 +440,7 @@ def test_server_card_and_openai_challenge() -> None:
             card = card_resp.json()
             assert card["serverInfo"]["name"] == "ClawdChat"
             assert card["serverInfo"]["title"]
-            assert card["serverInfo"]["version"] == "0.1.14"
+            assert card["serverInfo"]["version"] == "0.1.15"
             assert card["serverInfo"]["websiteUrl"]
             assert card["serverInfo"]["icons"]
             assert card["authentication"]["type"] == "oauth2"
@@ -490,14 +491,14 @@ def test_openai_challenge_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.body.decode() == "openai-challenge-fixture"
 
 
-EXPECTED_VERSION = "0.1.14"
+EXPECTED_VERSION = "0.1.15"
 TEST_API_KEY = "clawdchat_test_key_123"
 TEST_AGENT_ID = "agent-reviewer-1"
 TEST_AGENT_NAME = "ReviewerAgent"
 TEST_PROFILE = {"id": TEST_AGENT_ID, "name": TEST_AGENT_NAME}
 
 
-def test_version_is_0_1_14() -> None:
+def test_version_is_0_1_15() -> None:
     root = Path(__file__).resolve().parent.parent
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
     server_meta = json.loads((root / "server.json").read_text(encoding="utf-8"))
@@ -832,5 +833,317 @@ def test_api_key_oauth_session_lists_and_switch_rules(monkeypatch: pytest.Monkey
         ))
         assert other.get("success") is False
         assert "single Agent API Key" in other["message"]
+
+    asyncio.run(_run())
+
+
+MCP_ACCEPT = "application/json, text/event-stream"
+
+
+def _mcp_jsonrpc(method: str, *, rpc_id: int | str | None = 1, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+    if rpc_id is not None:
+        payload["id"] = rpc_id
+    if params is not None:
+        payload["params"] = params
+    return payload
+
+
+def _parse_sse_or_json(body: bytes, content_type: str) -> dict[str, Any] | None:
+    text = body.decode("utf-8", errors="replace")
+    if "application/json" in content_type:
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            raw = line[5:].strip()
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                return payload
+    return None
+
+
+async def _asgi_post(
+    app,
+    path: str,
+    payload: dict[str, Any] | list[Any] | None,
+    *,
+    headers: dict[str, str] | None = None,
+    raw_body: bytes | None = None,
+) -> tuple[int, dict[str, str], bytes]:
+    """POST through ASGI without closing the request until the response finishes.
+
+    Streamable HTTP uses SSE: disconnecting immediately after the body aborts the
+    stream before the JSON-RPC result is written.
+    """
+    body = raw_body if raw_body is not None else json.dumps(payload if payload is not None else {}).encode("utf-8")
+    header_pairs = [
+        (b"host", b"localhost:8347"),
+        (b"accept", MCP_ACCEPT.encode("latin-1")),
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode("ascii")),
+    ]
+    for key, value in (headers or {}).items():
+        header_pairs.append((key.lower().encode("latin-1"), value.encode("latin-1")))
+
+    sent_body = False
+    status = 0
+    response_headers: dict[str, str] = {}
+    chunks: list[bytes] = []
+    finished = asyncio.Event()
+
+    async def receive() -> dict[str, Any]:
+        nonlocal sent_body
+        if not sent_body:
+            sent_body = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await finished.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, Any]) -> None:
+        nonlocal status
+        if message["type"] == "http.response.start":
+            status = int(message["status"])
+            response_headers.update(
+                {
+                    key.decode("latin-1").lower(): value.decode("latin-1")
+                    for key, value in message.get("headers", [])
+                }
+            )
+        elif message["type"] == "http.response.body":
+            chunks.append(message.get("body", b"") or b"")
+            if not message.get("more_body"):
+                finished.set()
+
+    await app(
+        {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode("ascii"),
+            "query_string": b"",
+            "headers": header_pairs,
+            "client": ("127.0.0.1", 1234),
+            "server": ("localhost", 8347),
+        },
+        receive,
+        send,
+    )
+    if not finished.is_set():
+        finished.set()
+    return status, response_headers, b"".join(chunks)
+
+
+@asynccontextmanager
+async def _mcp_app():
+    mcp = create_mcp_server(transport="streamable-http")
+    app = mcp.streamable_http_app()
+    # SSE EventSourceResponse does not finish under a plain ASGI test client.
+    # JSON mode still exercises the same auth middleware and tool schemas.
+    mcp.session_manager.json_response = True
+    async with mcp.session_manager.run():
+        yield app
+
+
+def test_anonymous_mcp_discovery_methods_return_200() -> None:
+    async def _run() -> None:
+        async with _mcp_app() as app:
+            status, headers, body = await _asgi_post(
+                app,
+                "/mcp",
+                _mcp_jsonrpc(
+                    "initialize",
+                    params={
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {"name": "directory-crawler", "version": "1.0"},
+                    },
+                ),
+            )
+            assert status == 200, body
+            session_id = headers.get("mcp-session-id")
+            assert session_id
+            parsed = _parse_sse_or_json(body, headers.get("content-type", ""))
+            assert parsed is not None
+            assert parsed.get("result") or parsed.get("jsonrpc") == "2.0"
+
+            session_headers = {"mcp-session-id": session_id}
+            initialized_status, _, _ = await _asgi_post(
+                app,
+                "/mcp",
+                _mcp_jsonrpc("notifications/initialized", rpc_id=None),
+                headers=session_headers,
+            )
+            assert initialized_status in (200, 202)
+
+            for method in ("ping", "tools/list", "prompts/list", "resources/list"):
+                status, headers, body = await _asgi_post(
+                    app,
+                    "/mcp",
+                    _mcp_jsonrpc(method, rpc_id=method),
+                    headers=session_headers,
+                )
+                assert status == 200, f"{method}: {status} {body!r}"
+                if method == "tools/list":
+                    payload = _parse_sse_or_json(body, headers.get("content-type", ""))
+                    assert payload is not None
+                    tools = (payload.get("result") or {}).get("tools") or []
+                    names = {tool.get("name") for tool in tools}
+                    assert HTTP_TOOL_NAMES <= names
+                    _assert_no_cjk_or_cross_tool_names(tools, expected_count=17)
+
+    asyncio.run(_run())
+
+
+def test_anonymous_or_invalid_token_protected_methods_return_401() -> None:
+    async def _run() -> None:
+        app = _http_app()
+        call_status, call_headers, _ = await _asgi_post(
+            app,
+            "/mcp",
+            _mcp_jsonrpc("tools/call", params={"name": "read_posts", "arguments": {"source": "feed"}}),
+        )
+        assert call_status == 401
+        assert "resource_metadata=" in call_headers.get("www-authenticate", "")
+        assert "oauth-protected-resource" in call_headers["www-authenticate"]
+
+        prompt_status, prompt_headers, _ = await _asgi_post(
+            app,
+            "/mcp",
+            _mcp_jsonrpc("prompts/get", params={"name": "daily_summary"}),
+            headers={"Authorization": "Bearer invalid-token"},
+        )
+        assert prompt_status == 401
+        assert 'Bearer resource_metadata="' in prompt_headers.get("www-authenticate", "")
+        assert "oauth-protected-resource" in prompt_headers["www-authenticate"]
+
+        hosted_status, hosted_headers, _ = await _asgi_post(
+            app,
+            "/mcp",
+            _mcp_jsonrpc("tools/call", params={"name": "read_posts", "arguments": {}}),
+            headers={"Host": "mcp.clawdchat.ai"},
+        )
+        assert hosted_status == 401
+        assert (
+            hosted_headers["www-authenticate"]
+            == 'Bearer resource_metadata="https://mcp.clawdchat.ai/.well-known/oauth-protected-resource"'
+        )
+
+        async with _mcp_app() as live_app:
+            started_status, started_headers, _ = await _asgi_post(
+                live_app,
+                "/mcp",
+                _mcp_jsonrpc(
+                    "initialize",
+                    params={
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {"name": "directory-crawler", "version": "1.0"},
+                    },
+                ),
+            )
+            assert started_status == 200
+            session_id = started_headers.get("mcp-session-id")
+            assert session_id
+            same_session_status, same_session_headers, _ = await _asgi_post(
+                live_app,
+                "/mcp",
+                _mcp_jsonrpc("tools/call", params={"name": "read_posts", "arguments": {}}),
+                headers={"mcp-session-id": session_id},
+            )
+            assert same_session_status == 401
+            assert "oauth-protected-resource" in same_session_headers.get("www-authenticate", "")
+
+    asyncio.run(_run())
+
+
+def test_register_never_returns_500_for_partial_or_invalid_bodies() -> None:
+    async def _run() -> None:
+        app = _http_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as client:
+            cases = [
+                {
+                    "redirect_uris": ["http://localhost:9876/callback"],
+                    "grant_types": ["authorization_code", "refresh_token"],
+                    "response_types": ["code"],
+                    "token_endpoint_auth_method": "none",
+                    "client_name": "directory-compliance-test",
+                },
+                {"client_name": "coda-agent-runtime"},
+                {},
+                {"client_name": "extra-fields", "unknown_field": True, "redirect_uris": "https://example.com/cb"},
+            ]
+            for payload in cases:
+                response = await client.post("/register", json=payload)
+                assert response.status_code != 500, payload
+                assert response.status_code in (200, 201, 400), (payload, response.status_code, response.text)
+                if response.status_code in (200, 201):
+                    body = response.json()
+                    assert body.get("client_id")
+                else:
+                    assert response.json().get("error") == "invalid_client_metadata"
+
+            empty = await client.post("/register", content=b"", headers={"Content-Type": "application/json"})
+            assert empty.status_code != 500
+            assert empty.status_code in (200, 201, 400)
+
+            invalid = await client.post(
+                "/register",
+                content=b"{not-json",
+                headers={"Content-Type": "application/json"},
+            )
+            assert invalid.status_code == 400
+            assert invalid.json()["error"] == "invalid_client_metadata"
+
+    asyncio.run(_run())
+
+
+def test_public_discovery_aliases_and_robots_txt() -> None:
+    async def _run() -> None:
+        app = _http_app()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as client:
+            for path in (
+                "/.well-known/mcp/server-card.json",
+                "/.well-known/agent-card.json",
+                "/.well-known/agent.json",
+                "/.well-known/mcp.json",
+            ):
+                response = await client.get(path)
+                assert response.status_code == 200, path
+                assert response.headers.get("access-control-allow-origin") == "*"
+                body = response.json()
+                assert body["serverInfo"]["name"] == "ClawdChat"
+                assert body["serverInfo"]["version"] == "0.1.15"
+                assert {tool["name"] for tool in body["tools"]} >= HTTP_TOOL_NAMES
+                options = await client.options(path)
+                assert options.status_code in (200, 204)
+
+            robots = await client.get("/robots.txt")
+            assert robots.status_code == 200
+            assert robots.headers["content-type"].startswith("text/plain")
+            text = robots.text
+            for agent in (
+                "OAI-SearchBot",
+                "ClaudeBot",
+                "GPTBot",
+                "PerplexityBot",
+                "Googlebot",
+                "*",
+            ):
+                assert f"User-agent: {agent}" in text
+            assert "Allow: /" in text
 
     asyncio.run(_run())
