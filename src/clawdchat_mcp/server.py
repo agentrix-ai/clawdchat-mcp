@@ -14,9 +14,11 @@ from pydantic import AnyHttpUrl, Field
 from starlette.requests import Request
 from starlette.routing import Route
 
-from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.middleware.auth_context import get_access_token as _sdk_get_access_token
 from mcp.server.auth.handlers.metadata import MetadataHandler
-from mcp.server.auth.routes import build_metadata, cors_middleware
+from mcp.server.auth.middleware.bearer_auth import RequireAuthMiddleware
+from mcp.server.auth.provider import AccessToken
+from mcp.server.auth.routes import REGISTRATION_PATH, build_metadata, cors_middleware
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -31,9 +33,13 @@ from .auth_provider import (
     select_agent_page_handler,
 )
 from .config import settings
+from .anon_discovery import DiscoveryAwareAuthMiddleware
+from .dcr import make_dcr_handler
 from .discovery import (
+    PUBLIC_CARD_PATHS,
     openai_apps_challenge_response,
     oauth_protected_resource_handler,
+    robots_txt_handler,
     server_card_handler,
 )
 from .storage import store
@@ -115,7 +121,91 @@ class ClawdChatFastMCP(FastMCP):
                 app.routes[existing_paths[path]] = pr_route
             else:
                 app.routes.append(pr_route)
+
+        mcp_path = getattr(self.settings, "streamable_http_path", "/mcp")
+        required_scopes = list((auth.required_scopes or []) if auth else [])
+        for index, route in enumerate(app.routes):
+            path = getattr(route, "path", None)
+            if path == mcp_path:
+                inner = route.endpoint
+                if isinstance(inner, RequireAuthMiddleware):
+                    inner = inner.app
+                app.routes[index] = Route(
+                    path,
+                    endpoint=DiscoveryAwareAuthMiddleware(
+                        inner,
+                        required_scopes=required_scopes,
+                        session_manager=self._session_manager,
+                    ),
+                )
+            elif path == REGISTRATION_PATH and self._auth_server_provider:
+                app.routes[index] = Route(
+                    REGISTRATION_PATH,
+                    endpoint=cors_middleware(
+                        make_dcr_handler(
+                            self._auth_server_provider,
+                            auth.client_registration_options,
+                        ),
+                        ["POST", "OPTIONS"],
+                    ),
+                    methods=["POST", "OPTIONS"],
+                )
+
+        existing_paths = {
+            getattr(route, "path", None): index for index, route in enumerate(app.routes)
+        }
+
+        async def _public_card(request: Request):
+            return await server_card_handler(request, self.list_tools)
+
+        for path in PUBLIC_CARD_PATHS:
+            card_route = Route(
+                path,
+                endpoint=cors_middleware(_public_card, ["GET", "HEAD", "OPTIONS"]),
+                methods=["GET", "HEAD", "OPTIONS"],
+            )
+            if path in existing_paths:
+                app.routes[existing_paths[path]] = card_route
+            else:
+                app.routes.append(card_route)
+
+        robots_route = Route(
+            "/robots.txt",
+            endpoint=cors_middleware(robots_txt_handler, ["GET", "HEAD", "OPTIONS"]),
+            methods=["GET", "HEAD", "OPTIONS"],
+        )
+        if "/robots.txt" in existing_paths:
+            app.routes[existing_paths["/robots.txt"]] = robots_route
+        else:
+            app.routes.append(robots_route)
         return app
+
+
+def get_access_token() -> AccessToken | None:
+    """Resolve the current Bearer token, including upgraded anonymous sessions.
+
+    Streamable HTTP starts `run_server` on the first initialize. An anonymous
+    initialize leaves `auth_context_var` as None in that long-lived task.
+    Later Bearer-authenticated requests set the user on the Starlette Request
+    that FastMCP injects into `request_ctx`, which this fallback reads.
+    """
+    token = _sdk_get_access_token()
+    if token is not None:
+        return token
+    try:
+        from mcp.server.lowlevel.server import request_ctx
+
+        ctx = request_ctx.get()
+        req = getattr(ctx, "request", None)
+        scope = getattr(req, "scope", None)
+        if isinstance(scope, dict):
+            user = scope.get("user")
+            access_token = getattr(user, "access_token", None)
+            if isinstance(access_token, AccessToken):
+                return access_token
+    except LookupError:
+        pass
+    return None
 
 
 def _get_agent_client() -> ClawdChatAgentClient:
@@ -1416,9 +1506,25 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         )
 
     if not is_stdio:
-        @mcp.custom_route("/.well-known/mcp/server-card.json", methods=["GET"])
+        @mcp.custom_route("/.well-known/mcp/server-card.json", methods=["GET", "HEAD", "OPTIONS"])
         async def _server_card(request: Request):
             return await server_card_handler(request, mcp.list_tools)
+
+        @mcp.custom_route("/.well-known/agent-card.json", methods=["GET", "HEAD", "OPTIONS"])
+        async def _agent_card(request: Request):
+            return await server_card_handler(request, mcp.list_tools)
+
+        @mcp.custom_route("/.well-known/agent.json", methods=["GET", "HEAD", "OPTIONS"])
+        async def _agent_json(request: Request):
+            return await server_card_handler(request, mcp.list_tools)
+
+        @mcp.custom_route("/.well-known/mcp.json", methods=["GET", "HEAD", "OPTIONS"])
+        async def _mcp_json(request: Request):
+            return await server_card_handler(request, mcp.list_tools)
+
+        @mcp.custom_route("/robots.txt", methods=["GET", "HEAD", "OPTIONS"])
+        async def _robots_txt(request: Request):
+            return await robots_txt_handler(request)
 
         @mcp.custom_route("/.well-known/openai-apps-challenge", methods=["GET"])
         async def _openai_apps_challenge(_request: Request):

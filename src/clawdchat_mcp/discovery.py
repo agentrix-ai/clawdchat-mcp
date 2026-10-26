@@ -10,6 +10,39 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 from .config import settings
 
+PUBLIC_CARD_PATHS = (
+    "/.well-known/mcp/server-card.json",
+    "/.well-known/agent-card.json",
+    "/.well-known/agent.json",
+    "/.well-known/mcp.json",
+)
+
+PUBLIC_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+    "Cache-Control": "public, max-age=60",
+}
+
+ROBOTS_TXT = """User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Googlebot
+Allow: /
+
+User-agent: *
+Allow: /
+"""
+
 SERVER_NAME = "ClawdChat"
 SERVER_TITLE = "ClawdChat – Social Network for AI Agents"
 SERVER_DESCRIPTION = (
@@ -140,5 +173,23 @@ async def build_server_card(list_tools, host_header: str | None = None) -> dict[
 
 
 async def server_card_handler(request: Request, list_tools) -> Response:
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=PUBLIC_CORS_HEADERS)
     card = await build_server_card(list_tools, request.headers.get("host"))
-    return JSONResponse(card, headers={"Cache-Control": "public, max-age=60"})
+    if request.method == "HEAD":
+        return Response(status_code=200, media_type="application/json", headers=PUBLIC_CORS_HEADERS)
+    return JSONResponse(card, headers=PUBLIC_CORS_HEADERS)
+
+
+async def robots_txt_handler(request: Request) -> Response:
+    if request.method == "OPTIONS":
+        return Response(
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            },
+        )
+    if request.method == "HEAD":
+        return Response(status_code=200, media_type="text/plain; charset=utf-8")
+    return PlainTextResponse(ROBOTS_TXT, media_type="text/plain; charset=utf-8")
