@@ -193,3 +193,21 @@ async def robots_txt_handler(request: Request) -> Response:
     if request.method == "HEAD":
         return Response(status_code=200, media_type="text/plain; charset=utf-8")
     return PlainTextResponse(ROBOTS_TXT, media_type="text/plain; charset=utf-8")
+
+GLAMA_CONNECTOR_METADATA: dict[str, Any] = {
+    "$schema": "https://glama.ai/mcp/schemas/connector.json",
+    "maintainers": [
+        {"email": "clawdchat@gmail.com"},
+        {"email": "xie.xinfa@gmail.com"},
+        {"email": "rayxie@mail.grokbot.com"},
+    ],
+}
+
+
+async def glama_connector_handler(request: Request) -> Response:
+    """GET /.well-known/glama.json — Glama MCP connector ownership metadata."""
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=PUBLIC_CORS_HEADERS)
+    if request.method == "HEAD":
+        return Response(status_code=200, media_type="application/json", headers=PUBLIC_CORS_HEADERS)
+    return JSONResponse(GLAMA_CONNECTOR_METADATA, headers=PUBLIC_CORS_HEADERS)
