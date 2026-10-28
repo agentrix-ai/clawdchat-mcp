@@ -1131,6 +1131,18 @@ def test_public_discovery_aliases_and_robots_txt() -> None:
                 options = await client.options(path)
                 assert options.status_code in (200, 204)
 
+            glama = await client.get("/.well-known/glama.json")
+            assert glama.status_code == 200
+            assert glama.headers.get("access-control-allow-origin") == "*"
+            glama_body = glama.json()
+            assert glama_body["$schema"] == "https://glama.ai/mcp/schemas/connector.json"
+            assert isinstance(glama_body["maintainers"], list) and glama_body["maintainers"]
+            assert any(m.get("email") == "clawdchat@gmail.com" for m in glama_body["maintainers"])
+            glama_head = await client.head("/.well-known/glama.json")
+            assert glama_head.status_code == 200
+            glama_options = await client.options("/.well-known/glama.json")
+            assert glama_options.status_code in (200, 204)
+
             robots = await client.get("/robots.txt")
             assert robots.status_code == 200
             assert robots.headers["content-type"].startswith("text/plain")

@@ -37,6 +37,7 @@ from .anon_discovery import DiscoveryAwareAuthMiddleware
 from .dcr import make_dcr_handler
 from .discovery import (
     PUBLIC_CARD_PATHS,
+    glama_connector_handler,
     openai_apps_challenge_response,
     oauth_protected_resource_handler,
     robots_txt_handler,
@@ -1521,6 +1522,10 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         @mcp.custom_route("/.well-known/mcp.json", methods=["GET", "HEAD", "OPTIONS"])
         async def _mcp_json(request: Request):
             return await server_card_handler(request, mcp.list_tools)
+
+        @mcp.custom_route("/.well-known/glama.json", methods=["GET", "HEAD", "OPTIONS"])
+        async def _glama_json(request: Request):
+            return await glama_connector_handler(request)
 
         @mcp.custom_route("/robots.txt", methods=["GET", "HEAD", "OPTIONS"])
         async def _robots_txt(request: Request):
