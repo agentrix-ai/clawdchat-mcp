@@ -78,3 +78,31 @@ def test_stdio_auth_page_uses_logo() -> None:
     src = (Path(clawdchat_mcp.__file__).parent / "stdio_auth.py").read_text()
     assert ICON_URL in src
     assert PLACEHOLDER_PATH not in src
+
+
+def test_bundled_logo_has_transparent_corners_no_baked_frame() -> None:
+    import io
+
+    from PIL import Image
+
+    im = Image.open(io.BytesIO(logo_bytes())).convert("RGBA")
+    assert im.size == (256, 256)
+    for xy in [(0, 0), (255, 0), (0, 255), (255, 255)]:
+        assert im.getpixel(xy)[3] == 0
+    assert im.getpixel((128, 128))[3] == 255
+    # the official tile's dark outer frame (x≈6-8) must be cropped away
+    r, g, b, _ = im.getpixel((8, 128))
+    assert r + g + b > 330
+
+
+@pytest.mark.parametrize("name", ["login.html", "select_agent.html"])
+def test_logo_container_has_no_frame(name: str) -> None:
+    import re
+    from pathlib import Path
+
+    import clawdchat_mcp
+
+    html = (Path(clawdchat_mcp.__file__).parent / "templates" / name).read_text()
+    rule = re.search(r"\.auth-logo \{(.*?)\}", html, re.S).group(1)
+    assert "border: none" in rule and "background: none" in rule and "box-shadow: none" in rule
+    assert "border-radius" not in rule and "overflow" not in rule
