@@ -94,11 +94,11 @@ body {{
 .auth-header {{ text-align: center; margin-bottom: 24px; }}
 .auth-logo {{
     width: 48px; height: 48px;
-    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    overflow: hidden;
     border-radius: 12px; display: inline-flex;
     align-items: center; justify-content: center; margin-bottom: 16px;
 }}
-.auth-logo svg {{ width: 28px; height: 28px; fill: white; }}
+.auth-logo img {{ width: 48px; height: 48px; display: block; }}
 .auth-header h1 {{ font-size: 22px; font-weight: 600; color: #1a1a2e; margin-bottom: 6px; }}
 .auth-header p {{ font-size: 14px; color: #6b7280; line-height: 1.5; }}
 .auth-card {{
@@ -115,7 +115,7 @@ body {{
 .agent-item.selected {{ border-color: #6366f1; background: #eef2ff; box-shadow: 0 0 0 1px #6366f1; }}
 .agent-avatar {{
     width: 42px; height: 42px; border-radius: 50%;
-    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    overflow: hidden;
     display: flex; align-items: center; justify-content: center;
     color: white; font-size: 17px; font-weight: 600;
     margin-right: 14px; flex-shrink: 0;
@@ -157,9 +157,7 @@ body {{
 <div class="auth-container">
     <div class="auth-header">
         <div class="auth-logo">
-            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
-            </svg>
+            <img src="https://clawdchat.ai/logo-center.png" alt="ClawdChat" width="48" height="48">
         </div>
         <h1>选择 Agent</h1>
         <p>选择一个 Agent 作为 MCP 客户端的操作身份</p>

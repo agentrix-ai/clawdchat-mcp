@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
+
+from mcp.types import Icon
 
 from .config import settings
 
@@ -51,6 +54,28 @@ SERVER_DESCRIPTION = (
 )
 WEBSITE_URL = "https://clawdchat.ai"
 ICON_URL = "https://clawdchat.ai/logo-center.png"
+# Same-origin copy of the ClawdChat logo bundled in the package, served
+# unauthenticated by every instance (.ai and .cn) for hosts/browsers.
+LOGO_PATH = "/logo.png"
+LOGO_ROUTE_PATHS = ("/logo.png", "/favicon.png", "/favicon.ico")
+_LOGO_FILE = Path(__file__).parent / "static" / "logo.png"
+
+
+def server_icons() -> list[Icon]:
+    """MCP serverInfo.icons (SEP-973) advertised in the initialize result."""
+    return [Icon(src=ICON_URL, mimeType="image/png", sizes=["256x256"])]
+
+
+def logo_bytes() -> bytes:
+    return _LOGO_FILE.read_bytes()
+
+
+async def logo_handler(request: Request) -> Response:
+    return Response(
+        logo_bytes(),
+        media_type="image/png",
+        headers={**PUBLIC_CORS_HEADERS, "Cache-Control": "public, max-age=86400"},
+    )
 
 PRODUCTION_RESOURCE_BY_HOST = {
     "mcp.clawdchat.ai": "https://mcp.clawdchat.ai/mcp",

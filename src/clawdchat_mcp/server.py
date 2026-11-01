@@ -12,10 +12,10 @@ from urllib.parse import urlparse
 
 from pydantic import AnyHttpUrl, Field
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from mcp.server.auth.middleware.auth_context import get_access_token as _sdk_get_access_token
-from mcp.server.auth.handlers.metadata import MetadataHandler
 from mcp.server.auth.middleware.bearer_auth import RequireAuthMiddleware
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.routes import REGISTRATION_PATH, build_metadata, cors_middleware
@@ -36,6 +36,11 @@ from .config import settings
 from .anon_discovery import DiscoveryAwareAuthMiddleware
 from .dcr import make_dcr_handler
 from .discovery import (
+    LOGO_PATH,
+    LOGO_ROUTE_PATHS,
+    WEBSITE_URL,
+    logo_handler,
+    server_icons,
     PUBLIC_CARD_PATHS,
     glama_connector_handler,
     openai_apps_challenge_response,
@@ -97,9 +102,19 @@ class ClawdChatFastMCP(FastMCP):
             metadata.token_endpoint_auth_methods_supported = [*methods, "none"]
 
         metadata_path = "/.well-known/oauth-authorization-server"
+        # RFC 8414 allows extension members; OAuthMetadata drops unknown fields,
+        # so append branding (logo_uri, service_documentation) after dumping.
+        metadata_doc = metadata.model_dump(mode="json", exclude_none=True)
+        issuer = str(auth.issuer_url).rstrip("/")
+        metadata_doc.setdefault("service_documentation", WEBSITE_URL)
+        metadata_doc["logo_uri"] = f"{issuer}{LOGO_PATH}"
+
+        async def _as_metadata(request: Request):
+            return JSONResponse(metadata_doc, headers={"Cache-Control": "public, max-age=3600"})
+
         replacement = Route(
             metadata_path,
-            endpoint=cors_middleware(MetadataHandler(metadata).handle, ["GET", "OPTIONS"]),
+            endpoint=cors_middleware(_as_metadata, ["GET", "OPTIONS"]),
             methods=["GET", "OPTIONS"],
         )
         for index, route in enumerate(app.routes):
@@ -160,6 +175,17 @@ class ClawdChatFastMCP(FastMCP):
         existing_paths = {
             getattr(route, "path", None): index for index, route in enumerate(app.routes)
         }
+
+        for path in LOGO_ROUTE_PATHS:
+            logo_route = Route(
+                path,
+                endpoint=cors_middleware(logo_handler, ["GET", "HEAD", "OPTIONS"]),
+                methods=["GET", "HEAD", "OPTIONS"],
+            )
+            if path in existing_paths:
+                app.routes[existing_paths[path]] = logo_route
+            else:
+                app.routes.append(logo_route)
 
         async def _public_card(request: Request):
             return await server_card_handler(request, self.list_tools)
@@ -316,6 +342,8 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         # Auth via browser (authenticate tool) or CLAWDCHAT_API_KEY env var.
         mcp = FastMCP(
             name="ClawdChat",
+            website_url=WEBSITE_URL,
+            icons=server_icons(),
             instructions=(
                 "ClawdChat MCP Server for an AI agent network. "
                 "Create posts, comments, votes, follows, circles, and direct messages "
@@ -407,6 +435,8 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
 
         mcp = ClawdChatFastMCP(
             name="ClawdChat",
+            website_url=WEBSITE_URL,
+            icons=server_icons(),
             instructions=(
                 "ClawdChat MCP Server for an AI agent network. "
                 "Create posts, comments, votes, follows, circles, and direct messages "
