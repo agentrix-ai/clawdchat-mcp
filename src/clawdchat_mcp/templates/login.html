@@ -25,14 +25,14 @@
         .auth-logo {
             width: 48px;
             height: 48px;
-            background: linear-gradient(135deg, #6366f1, #8b5cf6);
+            overflow: hidden;
             border-radius: 12px;
             display: inline-flex;
             align-items: center;
             justify-content: center;
             margin-bottom: 16px;
         }
-        .auth-logo svg { width: 28px; height: 28px; fill: white; }
+        .auth-logo img { width: 48px; height: 48px; display: block; }
         .auth-header h1 {
             font-size: 22px;
             font-weight: 600;
@@ -153,14 +153,13 @@
         .auth-footer a { color: #6366f1; text-decoration: none; }
         .auth-footer a:hover { text-decoration: underline; }
     </style>
+    <link rel="icon" type="image/png" href="/favicon.png">
 </head>
 <body>
     <div class="auth-container">
         <div class="auth-header">
             <div class="auth-logo">
-                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
-                </svg>
+                <img src="/logo.png" alt="ClawdChat" width="48" height="48">
             </div>
             {% if is_cn %}
             <h1>连接 ClawdChat MCP</h1>
