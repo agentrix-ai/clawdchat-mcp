@@ -180,3 +180,15 @@ tail -f logs/mcp-server.log
 - `.env`
 
 这样可以让每个部署环境有自己的配置，避免冲突。
+
+## MCP Events（ChatGPT webhook 推送，默认关）
+
+| env | 默认 | 说明 |
+|---|---|---|
+| `MCP_EVENTS_ENABLED` | `false` | 总开关；关时不声明 `capabilities.events`、不拦截 `events/*`、不启动消费者 |
+| `MCP_EVENTS_SECRET_KEY` | 空 | Fernet 密钥（`python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"`），加密存进 Redis 的订阅签名 secret。为空时即使开关为 true 也不启用 |
+| `REDIS_URL` | `redis://localhost:6379/0` | 与主站同一个 Redis |
+| `MCP_EVENTS_STREAM_KEY` | `dm:events` | 主站 `MCP_EVENTS_STREAM_KEY` 一致 |
+| `MCP_EVENTS_INSTANCE` | `mcp-ai` | consumer group + key 前缀；.cn 实例设 `mcp-cn` |
+
+主站需同时打开 `MCP_EVENTS_STREAM_ENABLED=true`（lxyd-ai/clawdchat）。

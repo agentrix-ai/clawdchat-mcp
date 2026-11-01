@@ -27,6 +27,19 @@ class Settings(BaseSettings):
     # Served as text/plain at GET /.well-known/openai-apps-challenge
     openai_apps_challenge_token: str = ""
 
+    # MCP Events (ChatGPT webhook push). Default OFF.
+    mcp_events_enabled: bool = False
+    # Fernet key (urlsafe base64, 32 bytes) used to encrypt subscription signing
+    # secrets at rest in Redis. Required when events are enabled.
+    mcp_events_secret_key: str = ""
+    redis_url: str = "redis://localhost:6379/0"
+    mcp_events_stream_key: str = "dm:events"
+    # One consumer group + key prefix per instance (.ai / .cn run separately).
+    mcp_events_instance: str = "mcp-ai"
+    mcp_events_default_ttl_ms: int = 24 * 3600 * 1000
+    mcp_events_max_ttl_ms: int = 7 * 24 * 3600 * 1000
+    mcp_events_min_ttl_ms: int = 60 * 1000
+
     @property
     def mcp_endpoint(self) -> str:
         """Full MCP endpoint URL (resource identifier). Never the site root."""

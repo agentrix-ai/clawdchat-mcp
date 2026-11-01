@@ -27,12 +27,15 @@ dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "uvicorn>=0.34.0",
+    "redis>=5.0.0",
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]
 test = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
+    "fakeredis>=2.26.0",
 ]
 
 [project.urls]
