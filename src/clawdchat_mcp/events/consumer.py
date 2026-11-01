@@ -100,4 +100,7 @@ async def run_consumer(redis: Any, store: SubscriptionStore, token_store: Any, s
             raise
         except Exception as exc:
             logger.warning("MCP events consumer error: %s", type(exc).__name__)
+            # A read can time out client-side after Redis already handed us
+            # entries (now pending for this consumer); re-drain our PEL.
+            last_id = "0"
             await asyncio.sleep(2)

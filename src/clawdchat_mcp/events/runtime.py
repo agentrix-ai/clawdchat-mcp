@@ -13,6 +13,8 @@ from .store import SubscriptionStore
 
 logger = logging.getLogger(__name__)
 
+REDIS_SOCKET_TIMEOUT_SECONDS = 15.0
+
 _redis: Any = None
 _store: Optional[SubscriptionStore] = None
 
@@ -22,7 +24,14 @@ def get_redis() -> Any:
     if _redis is None:
         import redis.asyncio as aioredis
 
-        _redis = aioredis.from_url(settings.redis_url, decode_responses=True)
+        _redis = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            # redis-py >= 8 defaults socket_timeout to 5s, which equals the
+            # consumer's XREADGROUP block=5000 and turns every idle poll into
+            # a TimeoutError. Keep it comfortably above the block window.
+            socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+        )
     return _redis
 
 
