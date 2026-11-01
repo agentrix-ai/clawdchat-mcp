@@ -30,6 +30,10 @@ MAX_ATTEMPTS = 5
 BACKOFF_SECONDS: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0)
 NO_RETRY_STATUSES = frozenset({410, 413})
 RESPONSE_READ_LIMIT = 4096
+# Callback hosts behind Cloudflare (e.g. chatgpt.com) answer the default
+# "python-httpx/x" User-Agent with a 403 bot challenge, so verification fails
+# with reason=http_403. Always send an explicit product User-Agent.
+USER_AGENT = "ClawdChat-MCP-Events/1.0 (+https://clawdchat.ai)"
 
 
 @dataclass
@@ -78,6 +82,7 @@ def signed_headers(msg_id: str, body: bytes, secrets: list[str], sub_id: str) ->
     ts = int(time.time())  # fresh timestamp + signature per attempt
     return {
         "Content-Type": "application/json",
+        "User-Agent": USER_AGENT,
         "webhook-id": msg_id,
         "webhook-timestamp": str(ts),
         "webhook-signature": sign_all(secrets, msg_id, ts, body),
