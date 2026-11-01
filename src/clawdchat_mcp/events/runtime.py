@@ -66,6 +66,12 @@ def wrap_lifespan(app: Any, token_store: Any) -> None:
             stop = asyncio.Event()
             task = asyncio.create_task(run_consumer(get_redis(), get_store(), token_store, stop))
             logger.info("MCP events consumer started (group=%s)", settings.mcp_events_instance)
+            from .delivery import mask_proxy_url, webhook_proxy_url
+
+            _proxy = webhook_proxy_url()
+            logger.info(
+                "MCP events webhook egress: %s", mask_proxy_url(_proxy) if _proxy else "direct"
+            )
             try:
                 yield state
             finally:

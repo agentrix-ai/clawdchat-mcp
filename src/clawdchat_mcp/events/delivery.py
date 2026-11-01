@@ -20,6 +20,7 @@ from typing import Awaitable, Callable, Optional
 
 import httpx
 
+from ..config import settings
 from . import safety
 from .signing import dump_body, sign_all
 
@@ -47,17 +48,50 @@ PostFn = Callable[[str, bytes, dict], Awaitable[PostResult]]
 SleepFn = Callable[[float], Awaitable[None]]
 
 
+def webhook_proxy_url() -> str:
+    """Egress proxy for webhook POSTs only (``MCP_EVENTS_WEBHOOK_PROXY``)."""
+    return (settings.mcp_events_webhook_proxy or "").strip()
+
+
+def mask_proxy_url(proxy: str) -> str:
+    """Scheme + host:port only; credentials, path and query are dropped."""
+    try:
+        u = httpx.URL(proxy)
+        port = f":{u.port}" if u.port else ""
+        return f"{u.scheme}://{u.host}{port}"
+    except Exception:
+        return "<invalid-proxy>"
+
+
+def build_proxy_transport(proxy: str) -> httpx.AsyncBaseTransport:
+    """Transport that tunnels through ``proxy``; TLS is verified end-to-end
+    against the webhook hostname (httpx default ``verify=True``)."""
+    return httpx.AsyncHTTPTransport(proxy=proxy, verify=True, retries=0)
+
+
 async def safe_post(
     url: str, body: bytes, headers: dict, *, inner_transport: Optional[httpx.AsyncBaseTransport] = None
 ) -> PostResult:
-    """SSRF-checked POST to a pinned IP; never follows redirects; 10s budget."""
+    """SSRF-checked POST; never follows redirects; 10s budget.
+
+    Direct mode (default): connect to the pre-validated, pinned IP.
+    Proxy mode (``MCP_EVENTS_WEBHOOK_PROXY`` set): the target hostname is still
+    resolved locally and rejected if any address is private/reserved, but the
+    request is sent *by hostname* through the proxy (the proxy resolves it
+    again, e.g. ``socks5h``), so IP pinning cannot apply. TLS certificate and
+    hostname verification still protect the connection end to end.
+    """
     try:
         resolved = await safety.resolve_webhook_url(url)
     except safety.UnsafeWebhookURL as exc:
         return PostResult(None, error=f"unsafe_url:{exc.reason}")
-    transport = safety.PinnedIPAsyncTransport(
-        hostname=resolved.hostname, ip=resolved.ip, inner=inner_transport
-    )
+    proxy = webhook_proxy_url()
+    if proxy:
+        transport = inner_transport or build_proxy_transport(proxy)
+    else:
+        transport = safety.PinnedIPAsyncTransport(
+            hostname=resolved.hostname, ip=resolved.ip, inner=inner_transport
+        )
     timeout = httpx.Timeout(
         safety.WEBHOOK_TOTAL_TIMEOUT_SECONDS, connect=safety.WEBHOOK_CONNECT_TIMEOUT_SECONDS
     )
@@ -75,6 +109,7 @@ async def safe_post(
     except asyncio.TimeoutError:
         return PostResult(None, error="timeout")
     except Exception as exc:
+        # Type name only: proxy errors may embed the proxy URL (with credentials).
         return PostResult(None, error=type(exc).__name__)
 
 
