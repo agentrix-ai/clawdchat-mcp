@@ -83,7 +83,7 @@ def test_stdio_auth_page_uses_logo() -> None:
 def test_bundled_logo_has_transparent_corners_no_baked_frame() -> None:
     import io
 
-    from PIL import Image
+    Image = pytest.importorskip("PIL.Image")
 
     im = Image.open(io.BytesIO(logo_bytes())).convert("RGBA")
     assert im.size == (256, 256)
