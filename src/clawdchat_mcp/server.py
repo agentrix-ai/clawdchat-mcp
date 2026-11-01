@@ -44,6 +44,9 @@ from .discovery import (
     server_card_handler,
 )
 from .storage import store
+from .events import events_enabled
+from .events import runtime as events_runtime
+from .events.middleware import EventsMiddleware
 from .tool_meta import (
     AUTHENTICATE_TITLE,
     CREATE_POST_TITLE,
@@ -131,6 +134,8 @@ class ClawdChatFastMCP(FastMCP):
                 inner = route.endpoint
                 if isinstance(inner, RequireAuthMiddleware):
                     inner = inner.app
+                if events_enabled():
+                    inner = EventsMiddleware(inner, get_store=events_runtime.get_store, token_store=store)
                 app.routes[index] = Route(
                     path,
                     endpoint=DiscoveryAwareAuthMiddleware(
@@ -179,6 +184,8 @@ class ClawdChatFastMCP(FastMCP):
             app.routes[existing_paths["/robots.txt"]] = robots_route
         else:
             app.routes.append(robots_route)
+        if events_enabled():
+            events_runtime.wrap_lifespan(app, store)
         return app
 
 
@@ -1535,4 +1542,5 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         async def _openai_apps_challenge(_request: Request):
             return openai_apps_challenge_response()
 
+    events_runtime.patch_capabilities(mcp._mcp_server)
     return mcp
