@@ -1,0 +1,24 @@
+name: Tests
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package and test extras
+        run: pip install -e ".[test]"
+      - name: Run P0 auth confirm tests
+        run: python -m pytest -vv --tb=short test/test_p0_auth_confirm.py
+      - name: Run tests
+        run: python -m pytest -q

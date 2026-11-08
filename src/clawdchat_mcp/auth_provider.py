@@ -8,7 +8,6 @@ Authentication flow:
   MCP Client -> MCP Server -> ClawdChat (Google on .ai; phone/Google on .cn) -> MCP Server -> MCP Client
 """
 
-import json as _json
 import logging
 import time
 from pathlib import Path
@@ -34,6 +33,14 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken as OAuthToken
 from .oauth_redirect import AllowlistedOAuthClient
 
 from .api_client import ClawdChatAPIError, ClawdChatClient, ClawdChatUserClient
+from .auth_confirm import (
+    AGENT_NOT_OWNED,
+    CONFIRM_RESET_MUST_BE_BOOL,
+    ConfirmResetTypeError,
+    confirm_reset_from_mapping,
+    confirm_reset_is_true,
+    find_owned_agent,
+)
 from .config import settings
 from .storage import (
     AccessTokenData,
@@ -334,6 +341,54 @@ class LoginSiteCopy:
         return (zh if is_cn else en).format(**kwargs)
 
 
+class SelectAgentCopy:
+    """`.ai` English / `.cn` Chinese copy for the Agent confirmation gate."""
+
+    _ERRORS = {
+        "missing_params": ("Missing required parameters", "缺少必要参数"),
+        "expired": (
+            "Sign-in session expired. Please start again.",
+            "登录会话已过期，请重新开始",
+        ),
+        "auth_failed": ("Authentication failed", "认证失败"),
+        "no_token": (
+            "Authentication failed: no token received",
+            "认证失败：未获取到认证令牌",
+        ),
+        "agents_failed": ("Failed to load Agent list", "获取 Agent 列表失败"),
+        "no_agents": (
+            "You have not claimed any Agent. Claim one on ClawdChat first.",
+            "你还没有认领任何 Agent。请先在 ClawdChat 认领一个 Agent",
+        ),
+        "invalid_body": ("Invalid request body", "无效的请求"),
+        "missing_agent": ("Missing agent_id", "缺少参数"),
+        "session_expired": ("Session expired", "会话已过期"),
+        "not_owned": (AGENT_NOT_OWNED, "该 Agent 不在你名下"),
+        "confirm_type": (CONFIRM_RESET_MUST_BE_BOOL, "confirm_reset 必须是布尔值 true/false"),
+        "cred_failed": ("Failed to load credentials: {detail}", "获取凭证失败: {detail}"),
+        "reset_failed": ("Failed to reset API Key", "重置 API Key 失败"),
+        "unknown": ("Unknown error", "未知错误"),
+    }
+
+    @classmethod
+    def error(cls, is_cn: bool, key: str, **kwargs: str) -> str:
+        en, zh = cls._ERRORS[key]
+        return (zh if is_cn else en).format(**kwargs)
+
+    @classmethod
+    def reset_message(cls, is_cn: bool, agent_name: str) -> str:
+        if is_cn:
+            return (
+                f"Agent「{agent_name}」注册较早，未存储 API Key，"
+                "需要重置生成新 Key 后才能使用。重置后原有 Key 将失效。"
+            )
+        return (
+            f"Agent '{agent_name}' has no stored API key. "
+            "Set confirm_reset=true to generate and bind a new key. "
+            "Any previous key will stop working."
+        )
+
+
 def is_cn_site(request: Request) -> bool:
     """Public wrapper used by login handlers and unit tests."""
     return LoginSiteCopy.is_cn(request)
@@ -513,21 +568,48 @@ async def login_submit_handler(request: Request) -> Response:
     return RedirectResponse(url=redirect_uri, status_code=302)
 
 
+def render_select_agent_html(
+    *,
+    state: str,
+    agents: list,
+    is_cn: bool,
+    select_url: str = "/auth/select-agent",
+    logo_src: str | None = None,
+) -> str:
+    """Render the shared Agent confirmation page (hosted HTTP and stdio)."""
+    template = jinja_env.get_template("select_agent.html")
+    return template.render(
+        state=state,
+        agents=agents,
+        is_cn=is_cn,
+        select_url=select_url,
+        logo_src=logo_src or "/logo.png",
+    )
+
+
+def _callback_error_html(is_cn: bool, key: str, detail: str = "", status: int = 400) -> HTMLResponse:
+    title = SelectAgentCopy.error(is_cn, key)
+    extra = f"<p>{detail}</p>" if detail else ""
+    return HTMLResponse(f"<h1>{title}</h1>{extra}", status_code=status)
+
+
 async def clawdchat_callback_handler(request: Request) -> Response:
     """GET /auth/clawdchat/callback - Handle callback from ClawdChat authentication.
 
     ClawdChat redirects here after successful user authentication with a one-time code.
-    We exchange it for JWT, fetch agents, and continue the MCP OAuth flow.
+    We exchange it for JWT, fetch agents, and always require explicit Agent
+    confirmation — a login cookie / user JWT is not Agent authorization.
     """
+    is_cn = is_cn_site(request)
     code = request.query_params.get("code")
     state = request.query_params.get("state", "")
 
     if not code or not state:
-        return HTMLResponse("<h1>缺少必要参数</h1>", status_code=400)
+        return _callback_error_html(is_cn, "missing_params")
 
     pending = store.get_pending_login(state)
     if not pending:
-        return HTMLResponse("<h1>登录会话已过期，请重新开始</h1>", status_code=400)
+        return _callback_error_html(is_cn, "expired")
 
     # Exchange code for JWT via ClawdChat external token endpoint
     try:
@@ -536,15 +618,15 @@ async def clawdchat_callback_handler(request: Request) -> Response:
         jwt_token = result.get("jwt", "")
     except ClawdChatAPIError as e:
         logger.error(f"ClawdChat auth callback failed: {e}")
-        return HTMLResponse(f"<h1>认证失败</h1><p>{e.detail}</p>", status_code=400)
+        return _callback_error_html(is_cn, "auth_failed", detail=e.detail)
     except Exception as e:
         logger.exception("ClawdChat auth callback error")
-        return HTMLResponse(f"<h1>认证失败</h1><p>{str(e)}</p>", status_code=500)
+        return _callback_error_html(is_cn, "auth_failed", detail=str(e), status=500)
 
     if not jwt_token:
-        return HTMLResponse("<h1>认证失败</h1><p>未获取到认证令牌</p>", status_code=400)
+        return _callback_error_html(is_cn, "no_token")
 
-    # Update pending login with JWT
+    # Update pending login with JWT. Do not issue an auth code or Agent Key yet.
     pending.user_jwt = jwt_token
     pending.user_info = result.get("user")
 
@@ -554,36 +636,12 @@ async def clawdchat_callback_handler(request: Request) -> Response:
         agents_result = await user_client.get_my_agents()
         agents = agents_result.get("agents", [])
     except ClawdChatAPIError as e:
-        return HTMLResponse(f"<h1>获取 Agent 列表失败</h1><p>{e.detail}</p>", status_code=400)
+        return _callback_error_html(is_cn, "agents_failed", detail=e.detail)
 
     if not agents:
-        return HTMLResponse(
-            "<h1>你还没有认领任何 Agent</h1><p>请先在 ClawdChat 认领一个 Agent</p>",
-            status_code=400,
-        )
+        return _callback_error_html(is_cn, "no_agents")
 
-    if len(agents) == 1:
-        # Auto-select the only agent
-        agent = agents[0]
-        auth_result = await _complete_authorization(state, pending, agent["id"], agent["name"])
-        result_data = _json.loads(auth_result.body.decode())
-        if result_data.get("redirect"):
-            return HTMLResponse(
-                f'<html><head><meta http-equiv="refresh" content="0;url={result_data["redirect"]}" />'
-                f'</head><body>正在跳转...</body></html>'
-            )
-        elif result_data.get("needs_reset"):
-            return RedirectResponse(
-                url=f"{settings.mcp_server_url}/auth/select-agent?state={state}",
-                status_code=302,
-            )
-        else:
-            return HTMLResponse(
-                f"<h1>错误</h1><p>{result_data.get('error', '未知错误')}</p>",
-                status_code=400,
-            )
-
-    # Multiple agents -> redirect to select-agent page
+    # 1 or many Agents: always show the confirmation page. Never auto-complete.
     return RedirectResponse(
         url=f"{settings.mcp_server_url}/auth/select-agent?state={state}",
         status_code=302,
@@ -592,10 +650,11 @@ async def clawdchat_callback_handler(request: Request) -> Response:
 
 async def select_agent_page_handler(request: Request) -> HTMLResponse:
     """GET /auth/select-agent - Show agent selection page."""
+    is_cn = is_cn_site(request)
     state = request.query_params.get("state", "")
     pending = store.get_pending_login(state)
     if not pending or not pending.user_jwt:
-        return HTMLResponse("<h1>Invalid or expired session</h1>", status_code=400)
+        return _callback_error_html(is_cn, "expired")
 
     # Fetch agents
     try:
@@ -605,66 +664,98 @@ async def select_agent_page_handler(request: Request) -> HTMLResponse:
     except Exception:
         agents = []
 
-    template = jinja_env.get_template("select_agent.html")
-    html = template.render(state=state, agents=agents)
+    html = render_select_agent_html(state=state, agents=agents, is_cn=is_cn)
     return HTMLResponse(html)
 
 
 async def select_agent_callback_handler(request: Request) -> JSONResponse:
-    """POST /auth/select-agent - Handle agent selection."""
+    """POST /auth/select-agent - Handle explicit Agent confirmation."""
+    is_cn = is_cn_site(request)
     try:
         body = await request.json()
     except Exception:
-        return JSONResponse({"error": "Invalid request body"}, status_code=400)
+        return JSONResponse({"error": SelectAgentCopy.error(is_cn, "invalid_body")}, status_code=400)
+
+    if not isinstance(body, dict):
+        return JSONResponse({"error": SelectAgentCopy.error(is_cn, "invalid_body")}, status_code=400)
 
     state = body.get("state", "")
     agent_id = body.get("agent_id", "")
     agent_name = body.get("agent_name", "")
-    confirm_reset = body.get("confirm_reset", False)
+    try:
+        confirm_reset = confirm_reset_from_mapping(body)
+    except ConfirmResetTypeError:
+        return JSONResponse(
+            {"error": SelectAgentCopy.error(is_cn, "confirm_type")},
+            status_code=422,
+        )
 
     if not state or not agent_id:
-        return JSONResponse({"error": "缺少参数"}, status_code=400)
+        return JSONResponse({"error": SelectAgentCopy.error(is_cn, "missing_agent")}, status_code=400)
 
     pending = store.get_pending_login(state)
     if not pending or not pending.user_jwt:
-        return JSONResponse({"error": "会话已过期"}, status_code=400)
+        return JSONResponse({"error": SelectAgentCopy.error(is_cn, "session_expired")}, status_code=400)
 
-    return await _complete_authorization(state, pending, agent_id, agent_name, confirm_reset=confirm_reset)
+    return await _complete_authorization(
+        state, pending, agent_id, agent_name,
+        confirm_reset=confirm_reset,
+        is_cn=is_cn,
+    )
 
 
 async def _complete_authorization(
     state: str, pending: PendingLogin, agent_id: str, agent_name: str,
     confirm_reset: bool = False,
+    is_cn: bool = False,
 ) -> JSONResponse:
-    """Complete the OAuth authorization: get agent credentials, issue auth code, redirect."""
-    # Get agent's API key
+    """Complete the OAuth authorization after explicit Agent confirmation.
+
+    Login JWT is not sufficient: the caller must POST a chosen agent_id.
+    confirm_reset must be boolean True to rotate a missing stored key.
+    """
+    if not confirm_reset_is_true(confirm_reset):
+        confirm_reset = False
+
     try:
         user_client = ClawdChatUserClient(settings.clawdchat_api_url, pending.user_jwt)
+        agents_result = await user_client.get_my_agents()
+        agents = agents_result.get("agents", [])
+        owned = find_owned_agent(agents, agent_id)
+        if not owned:
+            return JSONResponse(
+                {"error": SelectAgentCopy.error(is_cn, "not_owned")},
+                status_code=403,
+            )
+        agent_id = str(owned.get("id") or agent_id)
+        agent_name = str(owned.get("name") or agent_name)
+
         cred_result = await user_client.get_agent_credentials(agent_id)
         api_key = cred_result.get("api_key")
 
         if not api_key:
             if not confirm_reset:
-                # Ask user to confirm before resetting
                 logger.info(f"Agent '{agent_name}' has no stored key, asking user to confirm reset")
                 return JSONResponse({
                     "needs_reset": True,
                     "agent_id": agent_id,
                     "agent_name": agent_name,
-                    "message": (
-                        f"Agent「{agent_name}」注册较早，未存储 API Key，"
-                        "需要重置生成新 Key 后才能使用。重置后原有 Key 将失效。"
-                    ),
+                    "message": SelectAgentCopy.reset_message(is_cn, agent_name),
                 })
 
-            # User confirmed, proceed with reset
             logger.info(f"User confirmed reset for agent '{agent_name}', resetting key")
             reset_result = await user_client.reset_agent_key(agent_id)
             api_key = reset_result.get("api_key")
             if not api_key:
-                return JSONResponse({"error": "重置 API Key 失败"}, status_code=400)
+                return JSONResponse(
+                    {"error": SelectAgentCopy.error(is_cn, "reset_failed")},
+                    status_code=400,
+                )
     except ClawdChatAPIError as e:
-        return JSONResponse({"error": f"获取凭证失败: {e.detail}"}, status_code=400)
+        return JSONResponse(
+            {"error": SelectAgentCopy.error(is_cn, "cred_failed", detail=e.detail)},
+            status_code=400,
+        )
 
     # Generate authorization code
     code = store.generate_code()
