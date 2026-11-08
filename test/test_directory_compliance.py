@@ -79,7 +79,7 @@ WRITE_ACTIONS: dict[str, set[str]] = {
         "delete_comment",
     },
     "direct_message": {"send", "action", "delete_conversation"},
-    "switch_agent": {"switch"},
+    "switch_agent": {"switch", "create"},
     "use_tools": {"call", "connect", "rate"},
 }
 

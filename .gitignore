@@ -33,6 +33,7 @@ uv.lock
 # OAuth persisted data
 .oauth_clients.json
 .oauth_tokens.json
+.oauth_token_key
 
 # Deployment
 logs/

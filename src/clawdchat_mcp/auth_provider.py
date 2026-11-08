@@ -4,8 +4,12 @@ Implements MCP's OAuthAuthorizationServerProvider interface.
 Handles the OAuth 2.1 flow with PKCE, delegating user authentication
 to the ClawdChat backend via its external auth (IdP) endpoint.
 
-Authentication flow:
-  MCP Client -> MCP Server -> ClawdChat (Google on .ai; phone/Google on .cn) -> MCP Server -> MCP Client
+Authentication flow (account-first, hosted HTTP):
+  MCP Client -> MCP Server -> ClawdChat account login (email / Google; .cn also phone)
+  -> consent page ("may use all your Agents and create new ones"; optionally bind one now)
+  -> MCP Client. The session is bound to the *user*; Agents are bound / switched /
+  created later with tools (switch_agent). Resetting a key still needs confirm_reset=true.
+  Pasting an Agent API Key (Channel B) still binds that single Agent only.
 """
 
 import logging
@@ -42,6 +46,7 @@ from .auth_confirm import (
     find_owned_agent,
 )
 from .config import settings
+from .user_jwt import renew_if_needed
 from .storage import (
     AccessTokenData,
     AuthCodeData,
@@ -177,6 +182,7 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
             agent_name=code_data.agent_name,
             user_jwt=code_data.user_jwt,
             resource=code_data.resource,
+            refresh_token=refresh_token,
         ))
 
         # Store refresh token
@@ -191,7 +197,10 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
             user_jwt=code_data.user_jwt,
         ))
 
-        logger.info(f"Issued tokens for agent '{code_data.agent_name}' (client: {client.client_id})")
+        logger.info(
+            f"Issued tokens for agent '{code_data.agent_name or '(none bound)'}' "
+            f"(client: {client.client_id})"
+        )
 
         return OAuthTokenType(
             access_token=access_token,
@@ -234,6 +243,8 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
         now = int(time.time())
 
         use_scopes = scopes if scopes else old_data.scopes
+        # Keep the ClawdChat user JWT alive alongside the 90-day refresh token
+        user_jwt = await renew_if_needed(old_data.user_jwt) if old_data.user_jwt else ""
 
         self.store.store_access_token(AccessTokenData(
             token=new_access,
@@ -243,7 +254,8 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
             agent_api_key=old_data.agent_api_key,
             agent_id=old_data.agent_id,
             agent_name=old_data.agent_name,
-            user_jwt=old_data.user_jwt,
+            user_jwt=user_jwt,
+            refresh_token=new_refresh,
         ))
 
         self.store.store_refresh_token(RefreshTokenData(
@@ -254,7 +266,7 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
             agent_api_key=old_data.agent_api_key,
             agent_id=old_data.agent_id,
             agent_name=old_data.agent_name,
-            user_jwt=old_data.user_jwt,
+            user_jwt=user_jwt,
         ))
 
         return OAuthTokenType(
@@ -575,8 +587,13 @@ def render_select_agent_html(
     is_cn: bool,
     select_url: str = "/auth/select-agent",
     logo_src: str | None = None,
+    account_mode: bool = False,
 ) -> str:
-    """Render the shared Agent confirmation page (hosted HTTP and stdio)."""
+    """Render the shared Agent confirmation page (hosted HTTP and stdio).
+
+    ``account_mode`` (hosted only): consent page for the account-first flow —
+    authorize the client for all Agents, optionally bind one now or later.
+    """
     template = jinja_env.get_template("select_agent.html")
     return template.render(
         state=state,
@@ -584,6 +601,7 @@ def render_select_agent_html(
         is_cn=is_cn,
         select_url=select_url,
         logo_src=logo_src or "/logo.png",
+        account_mode=account_mode,
     )
 
 
@@ -597,8 +615,8 @@ async def clawdchat_callback_handler(request: Request) -> Response:
     """GET /auth/clawdchat/callback - Handle callback from ClawdChat authentication.
 
     ClawdChat redirects here after successful user authentication with a one-time code.
-    We exchange it for JWT, fetch agents, and always require explicit Agent
-    confirmation — a login cookie / user JWT is not Agent authorization.
+    We exchange it for JWT and always show the consent page — a login alone never
+    completes authorization. Accounts without Agents are fine: they create one later.
     """
     is_cn = is_cn_site(request)
     code = request.query_params.get("code")
@@ -630,18 +648,14 @@ async def clawdchat_callback_handler(request: Request) -> Response:
     pending.user_jwt = jwt_token
     pending.user_info = result.get("user")
 
-    # Fetch user's agents
+    # Check the account is usable (do not auto-create a default Agent: the user names it)
     try:
         user_client = ClawdChatUserClient(settings.clawdchat_api_url, jwt_token)
-        agents_result = await user_client.get_my_agents()
-        agents = agents_result.get("agents", [])
+        await user_client.get_my_agents(auto_create=False)
     except ClawdChatAPIError as e:
         return _callback_error_html(is_cn, "agents_failed", detail=e.detail)
 
-    if not agents:
-        return _callback_error_html(is_cn, "no_agents")
-
-    # 1 or many Agents: always show the confirmation page. Never auto-complete.
+    # 0, 1 or many Agents: always show the consent page. Never auto-complete.
     return RedirectResponse(
         url=f"{settings.mcp_server_url}/auth/select-agent?state={state}",
         status_code=302,
@@ -659,12 +673,17 @@ async def select_agent_page_handler(request: Request) -> HTMLResponse:
     # Fetch agents
     try:
         user_client = ClawdChatUserClient(settings.clawdchat_api_url, pending.user_jwt)
-        agents_result = await user_client.get_my_agents()
-        agents = agents_result.get("agents", [])
+        agents_result = await user_client.get_my_agents(auto_create=False)
+        agents = [
+            a for a in agents_result.get("agents", [])
+            if a.get("is_active", True) and a.get("is_claimed", True)
+        ]
     except Exception:
         agents = []
 
-    html = render_select_agent_html(state=state, agents=agents, is_cn=is_cn)
+    html = render_select_agent_html(
+        state=state, agents=agents, is_cn=is_cn, account_mode=True
+    )
     return HTMLResponse(html)
 
 
@@ -682,6 +701,7 @@ async def select_agent_callback_handler(request: Request) -> JSONResponse:
     state = body.get("state", "")
     agent_id = body.get("agent_id", "")
     agent_name = body.get("agent_name", "")
+    bind_later = body.get("bind_later") is True
     try:
         confirm_reset = confirm_reset_from_mapping(body)
     except ConfirmResetTypeError:
@@ -690,12 +710,16 @@ async def select_agent_callback_handler(request: Request) -> JSONResponse:
             status_code=422,
         )
 
-    if not state or not agent_id:
+    if not state or (not agent_id and not bind_later):
         return JSONResponse({"error": SelectAgentCopy.error(is_cn, "missing_agent")}, status_code=400)
 
     pending = store.get_pending_login(state)
     if not pending or not pending.user_jwt:
         return JSONResponse({"error": SelectAgentCopy.error(is_cn, "session_expired")}, status_code=400)
+
+    if not agent_id:
+        # Account-level consent only: no Agent bound yet (switch_agent can bind / create later)
+        return _issue_auth_code(state, pending, api_key="", agent_id="", agent_name="")
 
     return await _complete_authorization(
         state, pending, agent_id, agent_name,
@@ -719,7 +743,7 @@ async def _complete_authorization(
 
     try:
         user_client = ClawdChatUserClient(settings.clawdchat_api_url, pending.user_jwt)
-        agents_result = await user_client.get_my_agents()
+        agents_result = await user_client.get_my_agents(auto_create=False)
         agents = agents_result.get("agents", [])
         owned = find_owned_agent(agents, agent_id)
         if not owned:
@@ -757,7 +781,13 @@ async def _complete_authorization(
             status_code=400,
         )
 
-    # Generate authorization code
+    return _issue_auth_code(state, pending, api_key=api_key, agent_id=agent_id, agent_name=agent_name)
+
+
+def _issue_auth_code(
+    state: str, pending: PendingLogin, *, api_key: str, agent_id: str, agent_name: str
+) -> JSONResponse:
+    """Issue the OAuth code for a consented account session (Agent optional)."""
     code = store.generate_code()
     store.store_auth_code(AuthCodeData(
         code=code,
@@ -781,6 +811,8 @@ async def _complete_authorization(
     redirect_uri = construct_redirect_uri(
         pending.redirect_uri, code=code, state=pending.oauth_state or None
     )
-    logger.info(f"Authorization complete for agent '{agent_name}', redirecting to client")
+    logger.info(
+        f"Authorization complete for agent '{agent_name or '(none bound)'}', redirecting to client"
+    )
 
     return JSONResponse({"redirect": redirect_uri})

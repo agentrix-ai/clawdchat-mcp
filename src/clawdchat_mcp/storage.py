@@ -3,15 +3,23 @@
 Client registrations, access tokens, and refresh tokens are persisted to JSON
 files so they survive server restarts. Auth codes and pending logins are
 short-lived and kept in-memory only.
+
+Secrets at rest: ``agent_api_key`` and ``user_jwt`` are Fernet-encrypted in the
+tokens file (``enc:v1:`` prefix). The key comes from ``MCP_TOKEN_ENCRYPTION_KEY``;
+without it a random key is generated once into ``.oauth_token_key`` (0600).
+Legacy plaintext values still load and are re-encrypted on the next save.
 """
 
 import json
 import logging
+import os
 import secrets
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
+
+from cryptography.fernet import Fernet, InvalidToken
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +27,53 @@ logger = logging.getLogger(__name__)
 _DATA_DIR = Path(__file__).parent.parent.parent
 CLIENTS_FILE = _DATA_DIR / ".oauth_clients.json"
 TOKENS_FILE = _DATA_DIR / ".oauth_tokens.json"
+TOKEN_KEY_FILE = _DATA_DIR / ".oauth_token_key"
+
+_ENC_PREFIX = "enc:v1:"
+_SECRET_FIELDS = ("agent_api_key", "user_jwt")
+
+
+def _load_fernet() -> Fernet:
+    from .config import settings
+
+    key = (settings.mcp_token_encryption_key or "").strip()
+    if not key:
+        if TOKEN_KEY_FILE.exists():
+            key = TOKEN_KEY_FILE.read_text(encoding="utf-8").strip()
+        else:
+            key = Fernet.generate_key().decode()
+            TOKEN_KEY_FILE.write_text(key, encoding="utf-8")
+            try:
+                os.chmod(TOKEN_KEY_FILE, 0o600)
+            except OSError:
+                pass
+            logger.warning(
+                "MCP_TOKEN_ENCRYPTION_KEY not set; generated %s for token encryption",
+                TOKEN_KEY_FILE.name,
+            )
+    return Fernet(key.encode())
+
+
+def _encrypt_secrets(record: dict, fernet: Fernet) -> dict:
+    out = dict(record)
+    for name in _SECRET_FIELDS:
+        value = out.get(name)
+        if value and not str(value).startswith(_ENC_PREFIX):
+            out[name] = _ENC_PREFIX + fernet.encrypt(str(value).encode()).decode()
+    return out
+
+
+def _decrypt_secrets(record: dict, fernet: Fernet) -> dict:
+    out = dict(record)
+    for name in _SECRET_FIELDS:
+        value = out.get(name)
+        if isinstance(value, str) and value.startswith(_ENC_PREFIX):
+            try:
+                out[name] = fernet.decrypt(value[len(_ENC_PREFIX):].encode()).decode()
+            except InvalidToken:
+                logger.warning("Could not decrypt stored %s (key changed?); dropping it", name)
+                out[name] = ""
+    return out
 
 
 @dataclass
@@ -52,6 +107,8 @@ class AccessTokenData:
     agent_name: str
     user_jwt: str
     resource: Optional[str] = None
+    # Refresh token issued together with this access token (keeps bindings in sync)
+    refresh_token: Optional[str] = None
 
 
 @dataclass
@@ -117,6 +174,7 @@ class TokenStore:
         self.refresh_tokens: dict[str, RefreshTokenData] = {}
         self.clients: dict[str, OAuthClientData] = {}
         self.pending_logins: dict[str, PendingLogin] = {}  # keyed by state
+        self._fernet = _load_fernet()
         self._load_clients()
         self._load_tokens()
 
@@ -156,13 +214,34 @@ class TokenStore:
     def update_access_token_agent(
         self, token: str, agent_api_key: str, agent_id: str, agent_name: str
     ) -> bool:
-        """Update the agent associated with an access token (for agent switching)."""
+        """Bind an access token (and its refresh token) to an agent.
+
+        The refresh token is updated too, so a later token refresh keeps the
+        agent the user switched to instead of reverting to the original one.
+        """
         data = self.access_tokens.get(token)
         if not data:
             return False
         data.agent_api_key = agent_api_key
         data.agent_id = agent_id
         data.agent_name = agent_name
+        rt = self.refresh_tokens.get(data.refresh_token or "")
+        if rt is not None:
+            rt.agent_api_key = agent_api_key
+            rt.agent_id = agent_id
+            rt.agent_name = agent_name
+        self._save_tokens()
+        return True
+
+    def update_user_jwt(self, token: str, user_jwt: str) -> bool:
+        """Store a renewed ClawdChat user JWT on an access token and its refresh token."""
+        data = self.access_tokens.get(token)
+        if not data:
+            return False
+        data.user_jwt = user_jwt
+        rt = self.refresh_tokens.get(data.refresh_token or "")
+        if rt is not None:
+            rt.user_jwt = user_jwt
         self._save_tokens()
         return True
 
@@ -219,10 +298,20 @@ class TokenStore:
         """Persist access tokens and refresh tokens to JSON file."""
         try:
             data = {
-                "access_tokens": {k: asdict(v) for k, v in self.access_tokens.items()},
-                "refresh_tokens": {k: asdict(v) for k, v in self.refresh_tokens.items()},
+                "access_tokens": {
+                    k: _encrypt_secrets(asdict(v), self._fernet)
+                    for k, v in self.access_tokens.items()
+                },
+                "refresh_tokens": {
+                    k: _encrypt_secrets(asdict(v), self._fernet)
+                    for k, v in self.refresh_tokens.items()
+                },
             }
             TOKENS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            try:
+                os.chmod(TOKENS_FILE, 0o600)
+            except OSError:
+                pass
         except Exception as e:
             logger.warning(f"Failed to save tokens: {e}")
 
@@ -236,14 +325,14 @@ class TokenStore:
             loaded_at = loaded_rt = 0
 
             for k, v in data.get("access_tokens", {}).items():
-                token_data = AccessTokenData(**v)
+                token_data = AccessTokenData(**_decrypt_secrets(v, self._fernet))
                 if token_data.expires_at and token_data.expires_at < now:
                     continue  # skip expired
                 self.access_tokens[k] = token_data
                 loaded_at += 1
 
             for k, v in data.get("refresh_tokens", {}).items():
-                token_data = RefreshTokenData(**v)
+                token_data = RefreshTokenData(**_decrypt_secrets(v, self._fernet))
                 if token_data.expires_at and token_data.expires_at < now:
                     continue  # skip expired
                 self.refresh_tokens[k] = token_data

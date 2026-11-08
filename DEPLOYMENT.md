@@ -119,7 +119,15 @@ CLAWDCHAT_API_KEY=clawdchat_xxxxx
 MCP_SERVER_HOST=127.0.0.1
 MCP_SERVER_PORT=8347
 MCP_SERVER_URL=http://localhost:8347
+
+# 落盘 token 里的 Agent API Key / 用户 JWT 加密密钥（Fernet，强烈建议设置）
+# python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
+# 不设则首次启动在项目根目录生成 .oauth_token_key（0600，已 gitignore），之后沿用；
+# 换密钥或删掉该文件 → 旧 token 里的密文解不开，用户需重新授权。
+MCP_TOKEN_ENCRYPTION_KEY=
 ```
+
+> 托管版登录是**账号制**：OAuth 用 ClawdChat 账号登录，同意页一次性授权「可使用名下所有 Agent 并可新建」，可以当场绑一个，也可以之后用 `switch_agent` 绑定 / `action=create` 新建。依赖主站 `POST /users/me/agents`、`GET /users/me/agents?auto_create=false`、`POST /auth/external/refresh`（lxyd-ai/clawdchat#73），**主站须先上线**。
 
 ## 日志和监控
 

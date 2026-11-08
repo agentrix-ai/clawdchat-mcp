@@ -93,6 +93,32 @@ class FakeBackend:
         self.reset_calls: list[str] = []
         self.credential_calls: list[str] = []
         self.exchange_calls: list[str] = []
+        self.auto_create_flags: list[bool] = []
+        self.refresh_calls: list[str] = []
+        self.created: list[str] = []
+        self.max_agents = 10
+
+    async def create_agent(self, name: str, display_name: Any = None, description: Any = None) -> dict[str, Any]:
+        from clawdchat_mcp.api_client import ClawdChatAPIError
+
+        if len(self.agents) >= self.max_agents:
+            raise ClawdChatAPIError(
+                409,
+                "limit",
+                {
+                    "reason": "claim_limit_reached",
+                    "message": "limit reached",
+                    "existing_agents": self.public_agents(),
+                },
+            )
+        agent = {"id": f"agent-{name}", "name": name, "api_key": f"clawdchat_new_{name}"}
+        self.agents.append(agent)
+        self.created.append(name)
+        return {
+            "success": True,
+            "agent": {"id": agent["id"], "name": name, "display_name": display_name},
+            "api_key": agent["api_key"],
+        }
 
     def public_agents(self) -> list[dict[str, Any]]:
         return [
@@ -170,8 +196,16 @@ class FakeUserClient:
     async def exchange_external_code(self, code: str) -> dict[str, Any]:
         return await self.backend.exchange_external_code(code)
 
-    async def get_my_agents(self) -> dict[str, Any]:
+    async def get_my_agents(self, auto_create: bool = True) -> dict[str, Any]:
+        self.backend.auto_create_flags.append(auto_create)
         return await self.backend.get_my_agents()
+
+    async def create_agent(self, name: str, display_name: Any = None, description: Any = None) -> dict[str, Any]:
+        return await self.backend.create_agent(name, display_name, description)
+
+    async def refresh_external_jwt(self) -> dict[str, Any]:
+        self.backend.refresh_calls.append(self.jwt)
+        return {"jwt": f"{self.jwt}-renewed"}
 
     async def get_agent_credentials(self, agent_id: str) -> dict[str, Any]:
         return await self.backend.get_agent_credentials(agent_id)
@@ -287,11 +321,17 @@ class TestHostedLoginConfirm:
                         params={"code": "ext-code", "state": state},
                         follow_redirects=False,
                     )
-            assert resp.status_code == 400
-            assert "claimed" in resp.text.lower() or "认领" in resp.text
+                    # Account-first: zero Agents still reaches the consent page (no error),
+                    # never auto-creates a default Agent and never issues a code by itself.
+                    assert resp.status_code in (302, 303)
+                    assert "/auth/select-agent" in resp.headers["location"]
+                    page = await client.get(f"/auth/select-agent?state={state}")
+                    assert page.status_code == 200
+                    assert "bindLaterBtn" in page.text
             assert store.auth_codes == {}
             assert backend.reset_calls == []
             assert backend.credential_calls == []
+            assert backend.auto_create_flags and not any(backend.auto_create_flags)
 
         asyncio.run(_run())
 
