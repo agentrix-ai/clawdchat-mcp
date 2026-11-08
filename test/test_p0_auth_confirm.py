@@ -712,6 +712,25 @@ def _stdio_manager(backend: FakeBackend, agents: list[dict[str, Any]]) -> StdioA
     return mgr
 
 
+def _clear_stdio_auth() -> None:
+    from clawdchat_mcp.stdio_auth import stdio_auth
+
+    stdio_auth.jwt = ""
+    stdio_auth.api_key = ""
+    stdio_auth.agent_id = ""
+    stdio_auth.agent_name = ""
+    stdio_auth.agents = []
+    stdio_auth._error = ""
+
+
+def _stdio_no_oauth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force _get_agent_client() onto the process-local stdio_auth memory key."""
+    from clawdchat_mcp import server as server_mod
+
+    monkeypatch.setattr(server_mod, "get_access_token", lambda: None)
+    monkeypatch.setattr(server_mod.settings, "clawdchat_api_key", "")
+
+
 class TestStdioLoginConfirm:
     def test_zero_agents_raises_no_reset(self) -> None:
         backend = FakeBackend([])
@@ -799,40 +818,55 @@ class TestStdioLoginConfirm:
         assert backend.reset_calls == ["agent-a"]
         assert backend.agents[1]["api_key"] == "clawdchat_b"
 
-    def test_switch_keeps_original_key(self) -> None:
+    def test_switch_keeps_original_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from clawdchat_mcp.stdio_auth import stdio_auth
+
         backend = FakeBackend([
             {"id": "agent-a", "name": "Alpha", "api_key": "clawdchat_a"},
             {"id": "agent-b", "name": "Beta", "api_key": "clawdchat_b"},
         ])
-        mgr = _stdio_manager(backend, backend.agents)
-        with patch("clawdchat_mcp.stdio_auth.httpx.post", side_effect=backend.httpx_post), \
-             patch("clawdchat_mcp.stdio_auth.httpx.get", side_effect=backend.httpx_get):
-            assert mgr.select_agent("agent-a")["status"] == "authenticated"
-            original_a = backend.agents[0]["api_key"]
-            switched = mgr.select_agent("agent-b")
-            assert switched["status"] == "authenticated"
-            assert mgr.api_key == "clawdchat_b"
-            assert backend.agents[0]["api_key"] == original_a
-            assert backend.reset_calls == []
-            from clawdchat_mcp.api_client import ClawdChatAgentClient
-            followup = ClawdChatAgentClient("https://example.invalid", mgr.api_key)
-            assert followup.api_key == "clawdchat_b"
+        _stdio_no_oauth(monkeypatch)
+        stdio_auth.jwt = "jwt-test-user"
+        stdio_auth.agents = backend.public_agents()
+        try:
+            with patch("clawdchat_mcp.stdio_auth.httpx.post", side_effect=backend.httpx_post), \
+                 patch("clawdchat_mcp.stdio_auth.httpx.get", side_effect=backend.httpx_get):
+                assert stdio_auth.select_agent("agent-a")["status"] == "authenticated"
+                original_a = backend.agents[0]["api_key"]
+                switched = stdio_auth.select_agent("agent-b")
+                assert switched["status"] == "authenticated"
+                assert stdio_auth.api_key == "clawdchat_b"
+                followup = _get_agent_client()
+                assert followup.api_key == "clawdchat_b"
+                assert backend.agents[0]["api_key"] == original_a
+                assert backend.reset_calls == []
+        finally:
+            _clear_stdio_auth()
 
-    def test_switch_to_missing_key_keeps_previous_binding(self) -> None:
+    def test_switch_to_missing_key_keeps_previous_binding(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from clawdchat_mcp.stdio_auth import stdio_auth
+
         backend = FakeBackend([
             {"id": "agent-a", "name": "Alpha", "api_key": "clawdchat_a"},
             {"id": "agent-b", "name": "Beta", "api_key": None},
         ])
-        mgr = _stdio_manager(backend, backend.agents)
-        with patch("clawdchat_mcp.stdio_auth.httpx.post", side_effect=backend.httpx_post), \
-             patch("clawdchat_mcp.stdio_auth.httpx.get", side_effect=backend.httpx_get):
-            mgr.select_agent("agent-a")
-            result = mgr.select_agent("agent-b")
-        assert result.get("needs_reset") is True
-        assert mgr.api_key == "clawdchat_a"
-        assert mgr.agent_id == "agent-a"
-        assert backend.reset_calls == []
-        assert backend.agents[1]["api_key"] is None
+        _stdio_no_oauth(monkeypatch)
+        stdio_auth.jwt = "jwt-test-user"
+        stdio_auth.agents = backend.public_agents()
+        try:
+            with patch("clawdchat_mcp.stdio_auth.httpx.post", side_effect=backend.httpx_post), \
+                 patch("clawdchat_mcp.stdio_auth.httpx.get", side_effect=backend.httpx_get):
+                stdio_auth.select_agent("agent-a")
+                result = stdio_auth.select_agent("agent-b")
+                assert result.get("needs_reset") is True
+                assert stdio_auth.api_key == "clawdchat_a"
+                assert stdio_auth.agent_id == "agent-a"
+                followup = _get_agent_client()
+                assert followup.api_key == "clawdchat_a"
+                assert backend.reset_calls == []
+                assert backend.agents[1]["api_key"] is None
+        finally:
+            _clear_stdio_auth()
 
     def test_unowned_does_not_bind(self) -> None:
         backend = FakeBackend([{"id": "agent-a", "name": "Alpha", "api_key": "clawdchat_a"}])
@@ -921,6 +955,40 @@ class TestStdioLoginConfirm:
 
 
 class TestStdioSwitchTool:
+    def test_switch_stored_key_followup_get_agent_client_uses_b(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from clawdchat_mcp.stdio_auth import stdio_auth
+
+        backend = FakeBackend([
+            {"id": "agent-a", "name": "Alpha", "api_key": "clawdchat_a"},
+            {"id": "agent-b", "name": "Beta", "api_key": "clawdchat_b"},
+        ])
+        stdio_auth.jwt = "jwt-test-user"
+        stdio_auth.api_key = "clawdchat_a"
+        stdio_auth.agent_id = "agent-a"
+        stdio_auth.agent_name = "Alpha"
+        stdio_auth.agents = backend.public_agents()
+        mcp = create_mcp_server(transport="stdio")
+        _stdio_no_oauth(monkeypatch)
+        try:
+            with patch("clawdchat_mcp.stdio_auth.httpx.post", side_effect=backend.httpx_post), \
+                 patch("clawdchat_mcp.stdio_auth.httpx.get", side_effect=backend.httpx_get):
+                before = _get_agent_client()
+                assert before.api_key == "clawdchat_a"
+                switched = _tool_payload(asyncio.run(mcp.call_tool(
+                    "switch_agent", {"action": "switch", "agent_id": "agent-b"}
+                )))
+                assert switched.get("status") == "authenticated" or switched.get("success") is True
+                followup = _get_agent_client()
+                assert followup.api_key == "clawdchat_b"
+                assert followup is not before
+                assert backend.agents[0]["api_key"] == "clawdchat_a"
+                assert backend.agents[1]["api_key"] == "clawdchat_b"
+                assert backend.reset_calls == []
+        finally:
+            _clear_stdio_auth()
+
     def test_switch_agent_tool_uses_confirm_gate(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from clawdchat_mcp.stdio_auth import stdio_auth
 
@@ -934,29 +1002,27 @@ class TestStdioSwitchTool:
         stdio_auth.agent_name = "Alpha"
         stdio_auth.agents = backend.public_agents()
         mcp = create_mcp_server(transport="stdio")
-        monkeypatch.setattr(
-            "clawdchat_mcp.server.get_access_token",
-            lambda: (_ for _ in ()).throw(RuntimeError("no oauth")),
-        )
-        with patch("clawdchat_mcp.stdio_auth.httpx.post", side_effect=backend.httpx_post), \
-             patch("clawdchat_mcp.stdio_auth.httpx.get", side_effect=backend.httpx_get):
-            omitted = _tool_payload(asyncio.run(mcp.call_tool(
-                "switch_agent", {"action": "switch", "agent_id": "agent-b"}
-            )))
-            assert omitted.get("needs_reset") is True
-            assert stdio_auth.api_key == "clawdchat_a"
-            assert backend.reset_calls == []
+        _stdio_no_oauth(monkeypatch)
+        try:
+            with patch("clawdchat_mcp.stdio_auth.httpx.post", side_effect=backend.httpx_post), \
+                 patch("clawdchat_mcp.stdio_auth.httpx.get", side_effect=backend.httpx_get):
+                omitted = _tool_payload(asyncio.run(mcp.call_tool(
+                    "switch_agent", {"action": "switch", "agent_id": "agent-b"}
+                )))
+                assert omitted.get("needs_reset") is True
+                assert stdio_auth.api_key == "clawdchat_a"
+                unconfirmed = _get_agent_client()
+                assert unconfirmed.api_key == "clawdchat_a"
+                assert backend.reset_calls == []
 
-            confirmed = _tool_payload(asyncio.run(mcp.call_tool(
-                "switch_agent",
-                {"action": "switch", "agent_id": "agent-b", "confirm_reset": True},
-            )))
-            assert confirmed.get("status") == "authenticated"
-            assert stdio_auth.api_key == "clawdchat_rotated_agent-b"
-            assert backend.agents[0]["api_key"] == "clawdchat_a"
-
-        stdio_auth.jwt = ""
-        stdio_auth.api_key = ""
-        stdio_auth.agent_id = ""
-        stdio_auth.agent_name = ""
-        stdio_auth.agents = []
+                confirmed = _tool_payload(asyncio.run(mcp.call_tool(
+                    "switch_agent",
+                    {"action": "switch", "agent_id": "agent-b", "confirm_reset": True},
+                )))
+                assert confirmed.get("status") == "authenticated"
+                assert stdio_auth.api_key == "clawdchat_rotated_agent-b"
+                followup = _get_agent_client()
+                assert followup.api_key == "clawdchat_rotated_agent-b"
+                assert backend.agents[0]["api_key"] == "clawdchat_a"
+        finally:
+            _clear_stdio_auth()
