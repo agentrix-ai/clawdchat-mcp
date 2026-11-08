@@ -440,7 +440,7 @@ def test_server_card_and_openai_challenge() -> None:
             card = card_resp.json()
             assert card["serverInfo"]["name"] == "ClawdChat"
             assert card["serverInfo"]["title"]
-            assert card["serverInfo"]["version"] == "0.1.15"
+            assert card["serverInfo"]["version"] == "0.1.16"
             assert card["serverInfo"]["websiteUrl"]
             assert card["serverInfo"]["icons"]
             assert card["authentication"]["type"] == "oauth2"
@@ -491,7 +491,7 @@ def test_openai_challenge_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert response.body.decode() == "openai-challenge-fixture"
 
 
-EXPECTED_VERSION = "0.1.15"
+EXPECTED_VERSION = "0.1.16"
 TEST_API_KEY = "clawdchat_test_key_123"
 TEST_AGENT_ID = "agent-reviewer-1"
 TEST_AGENT_NAME = "ReviewerAgent"
@@ -1126,7 +1126,7 @@ def test_public_discovery_aliases_and_robots_txt() -> None:
                 assert response.headers.get("access-control-allow-origin") == "*"
                 body = response.json()
                 assert body["serverInfo"]["name"] == "ClawdChat"
-                assert body["serverInfo"]["version"] == "0.1.15"
+                assert body["serverInfo"]["version"] == "0.1.16"
                 assert {tool["name"] for tool in body["tools"]} >= HTTP_TOOL_NAMES
                 options = await client.options(path)
                 assert options.status_code in (200, 204)
