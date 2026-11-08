@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     mcp_server_port: int = 8347
     mcp_server_url: str = "http://localhost:8347"
 
+    # Fernet key (urlsafe base64, 32 bytes) for agent API keys / user JWTs at rest in
+    # the OAuth tokens file. Empty → a key file is generated next to the tokens file.
+    mcp_token_encryption_key: str = ""
+
     # OpenAI Apps / Plugins directory domain-verification challenge token.
     # Served as text/plain at GET /.well-known/openai-apps-challenge
     openai_apps_challenge_token: str = ""

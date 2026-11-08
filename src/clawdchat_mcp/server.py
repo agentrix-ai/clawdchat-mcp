@@ -254,6 +254,27 @@ def get_access_token() -> AccessToken | None:
     return None
 
 
+NO_AGENT_BOUND_MESSAGE = (
+    "No ClawdChat agent is bound to this session yet. "
+    "Call list_my_agents(action='list') to see your agents, then "
+    "switch_agent(agent_id='<id>') to bind one, or "
+    "switch_agent(action='create', name='<handle>') to create a new agent."
+)
+
+
+async def _account_jwt(access_token_obj: Any, token_data: Any) -> str:
+    """User JWT for account-level calls, renewed (and stored) when close to expiry."""
+    from .user_jwt import renew_if_needed
+
+    jwt = token_data.user_jwt or ""
+    if not jwt:
+        return ""
+    renewed = await renew_if_needed(jwt)
+    if renewed != jwt and access_token_obj is not None:
+        store.update_user_jwt(access_token_obj.token, renewed)
+    return renewed
+
+
 def _get_agent_client() -> ClawdChatAgentClient:
     """Get an agent API client for the current authenticated user.
 
@@ -272,6 +293,8 @@ def _get_agent_client() -> ClawdChatAgentClient:
         token_data = store.get_access_token(access_token.token)
         if not token_data:
             raise ValueError("Invalid or expired token - please re-authenticate")
+        if not token_data.agent_api_key:
+            raise ValueError(NO_AGENT_BOUND_MESSAGE)
         return ClawdChatAgentClient(settings.clawdchat_api_url, token_data.agent_api_key)
 
     # 2. Try stdio auth manager (browser OAuth in stdio mode)
@@ -309,6 +332,8 @@ def _get_current_agent_info() -> dict[str, str]:
         token_data = store.get_access_token(access_token.token)
         if not token_data:
             return {"error": "Invalid token"}
+        if not token_data.agent_id:
+            return {"bound": False, "message": NO_AGENT_BOUND_MESSAGE}
         return {
             "agent_id": token_data.agent_id,
             "agent_name": token_data.agent_name,
@@ -1310,6 +1335,8 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                             "current_agent_name": stdio_auth.agent_name,
                         })
                     return _format_result({"message": "Signed in but no agent is selected"})
+                if not token_data.agent_id:
+                    return _format_result({"bound": False, "message": NO_AGENT_BOUND_MESSAGE})
                 return _format_result({
                     "current_agent_id": token_data.agent_id,
                     "current_agent_name": token_data.agent_name,
@@ -1337,10 +1364,20 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                     })
 
                 user_client = ClawdChatUserClient(
-                    settings.clawdchat_api_url, token_data.user_jwt
+                    settings.clawdchat_api_url,
+                    await _account_jwt(access_token_obj, token_data),
                 )
                 try:
-                    result = await user_client.get_my_agents()
+                    result = await user_client.get_my_agents(auto_create=False)
+                    agents = result.get("agents") or []
+                    for a in agents:
+                        if isinstance(a, dict):
+                            a["is_current"] = a.get("id") == token_data.agent_id
+                    if not agents:
+                        result["hint"] = (
+                            "No agents yet. Create one with "
+                            "switch_agent(action='create', name='<handle>')."
+                        )
                     return _format_result(result)
                 except ClawdChatAPIError as e:
                     return f"Error: {e.detail}"
@@ -1355,24 +1392,33 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         name="switch_agent",
         title=SWITCH_AGENT_TITLE,
         description=(
-            "Switch the active agent for this session.\n"
+            "Bind this session to one of your agents, or create a new agent and bind it.\n"
             "Parameters:\n"
-            "- action: switch (default)\n"
-            "- agent_id: target agent UUID\n"
-            f"- confirm_reset: {CONFIRM_RESET_FIELD_DESCRIPTION}"
+            "- action: switch (default) or create\n"
+            "- agent_id: target agent UUID (switch)\n"
+            f"- confirm_reset: {CONFIRM_RESET_FIELD_DESCRIPTION}\n"
+            "- name: new agent handle for create (lowercase letters, digits, hyphens; "
+            "2-50 chars, globally unique). Ask the user which name they want.\n"
+            "- display_name: optional display name for create (Unicode and emoji allowed)\n"
+            "- description: optional bio for create\n"
+            "create needs a session signed in with a ClawdChat account and is subject "
+            "to the account's agent limit."
         ),
         annotations=write_annotations(SWITCH_AGENT_TITLE),
     )
     async def switch_agent(
-        action: Literal["switch"] = "switch",
+        action: Literal["switch", "create"] = "switch",
         agent_id: Optional[str] = None,
         confirm_reset: ConfirmResetParam = False,
+        name: Optional[str] = None,
+        display_name: Optional[str] = None,
+        description: Optional[str] = None,
     ) -> str:
-        """Switch the active agent."""
+        """Switch the active agent, or create one and bind it."""
         if action in ("current", "list"):
             return f"Error: read action '{action}' is not supported by this tool"
-        if action != "switch":
-            return f"Error: only action=switch is supported (got '{action}')"
+        if action not in ("switch", "create"):
+            return f"Error: action must be switch or create (got '{action}')"
         try:
             try:
                 access_token_obj = get_access_token()
@@ -1390,6 +1436,48 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                 if stdio_auth.is_authenticated or settings.clawdchat_api_key:
                     return "Error: sign-in is required to obtain user credentials"
                 return "Error: not signed in"
+
+            if action == "create":
+                if use_stdio or (token_data and not token_data.user_jwt):
+                    return (
+                        "Error: creating an agent needs a session signed in with a ClawdChat "
+                        "account (hosted MCP). Sessions bound to a single API key cannot create agents."
+                    )
+                if not name:
+                    return "Error: name is required for action=create"
+                user_client = ClawdChatUserClient(
+                    settings.clawdchat_api_url,
+                    await _account_jwt(access_token_obj, token_data),
+                )
+                try:
+                    created = await user_client.create_agent(
+                        name.strip(), display_name=display_name, description=description
+                    )
+                except ClawdChatAPIError as e:
+                    payload = e.payload if isinstance(e.payload, dict) else {}
+                    if payload.get("reason") == "claim_limit_reached":
+                        return _format_result({
+                            "success": False,
+                            "reason": "claim_limit_reached",
+                            "message": payload.get("message") or e.detail,
+                            "existing_agents": payload.get("existing_agents", []),
+                            "next_step": "Bind an existing agent with switch_agent(agent_id='<id>').",
+                        })
+                    return f"Error: {e.detail}"
+                agent = created.get("agent") or {}
+                api_key = created.get("api_key") or ""
+                if not api_key or not agent.get("id"):
+                    return "Error: agent was not created"
+                store.update_access_token_agent(
+                    access_token_obj.token, api_key, str(agent["id"]), agent.get("name", "")
+                )
+                return _format_result({
+                    "success": True,
+                    "message": f"Created and bound agent: {agent.get('name', '')}",
+                    "agent_id": str(agent["id"]),
+                    "agent_name": agent.get("name", ""),
+                    "display_name": agent.get("display_name"),
+                })
 
             if not agent_id:
                 return "Error: agent_id is required"
@@ -1416,12 +1504,13 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                 })
 
             user_client = ClawdChatUserClient(
-                settings.clawdchat_api_url, token_data.user_jwt
+                settings.clawdchat_api_url,
+                await _account_jwt(access_token_obj, token_data),
             )
             confirmed = confirm_reset_is_true(confirm_reset)
 
             try:
-                agents_result = await user_client.get_my_agents()
+                agents_result = await user_client.get_my_agents(auto_create=False)
                 owned = find_owned_agent(agents_result.get("agents"), agent_id)
                 if not owned:
                     return f"Error: Agent ID '{agent_id}' is not in the owned agent list"

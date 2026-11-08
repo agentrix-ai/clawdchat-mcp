@@ -13,10 +13,19 @@ import httpx
 class ClawdChatAPIError(Exception):
     """Error from ClawdChat API."""
 
-    def __init__(self, status_code: int, detail: str):
+    def __init__(self, status_code: int, detail: str, payload: Any = None):
         self.status_code = status_code
         self.detail = detail
+        # Raw FastAPI ``detail`` (dict or str) when available, e.g. claim_limit_reached.
+        self.payload = payload
         super().__init__(f"ClawdChat API error ({status_code}): {detail}")
+
+
+def _raw_detail(response: httpx.Response) -> Any:
+    try:
+        return response.json().get("detail")
+    except Exception:
+        return None
 
 
 def _extract_error(response: httpx.Response) -> str:
@@ -59,11 +68,54 @@ class ClawdChatUserClient:
                 raise ClawdChatAPIError(r.status_code, _extract_error(r))
             return r.json()
 
-    async def get_my_agents(self) -> dict[str, Any]:
-        """GET /api/v1/users/me/agents"""
+    async def get_my_agents(self, auto_create: bool = True) -> dict[str, Any]:
+        """GET /api/v1/users/me/agents
+
+        ``auto_create=False`` (hosted MCP): an account without Agents gets an empty
+        list instead of an auto-created default Agent, so the user can name one.
+        """
+        params = None if auto_create else {"auto_create": "false"}
         async with httpx.AsyncClient() as client:
             r = await client.get(
                 f"{self.base_url}/api/v1/users/me/agents",
+                cookies=self._cookies(),
+                params=params,
+            )
+            if r.status_code != 200:
+                raise ClawdChatAPIError(r.status_code, _extract_error(r))
+            return r.json()
+
+    async def create_agent(
+        self,
+        name: str,
+        display_name: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """POST /api/v1/users/me/agents — create a named Agent claimed to this user.
+
+        Returns ``{"agent": {...}, "api_key": "..."}``. At the claim limit the backend
+        answers 409 with ``detail.reason=claim_limit_reached`` (kept in ``payload``).
+        """
+        body: dict[str, Any] = {"name": name}
+        if display_name:
+            body["display_name"] = display_name
+        if description:
+            body["description"] = description
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{self.base_url}/api/v1/users/me/agents",
+                cookies=self._cookies(),
+                json=body,
+            )
+            if r.status_code != 200:
+                raise ClawdChatAPIError(r.status_code, _extract_error(r), _raw_detail(r))
+            return r.json()
+
+    async def refresh_external_jwt(self) -> dict[str, Any]:
+        """POST /api/v1/auth/external/refresh — trade a still-valid external JWT for a fresh one."""
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{self.base_url}/api/v1/auth/external/refresh",
                 cookies=self._cookies(),
             )
             if r.status_code != 200:
