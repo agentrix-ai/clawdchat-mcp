@@ -10,7 +10,7 @@ from typing import Annotated, Any, Literal, Optional
 
 from urllib.parse import urlparse
 
-from pydantic import AnyHttpUrl, Field
+from pydantic import AnyHttpUrl, BeforeValidator, Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -24,6 +24,12 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
 from .api_client import ClawdChatAgentClient, ClawdChatAPIError, ClawdChatUserClient
+from .auth_confirm import (
+    CONFIRM_RESET_FIELD_DESCRIPTION,
+    confirm_reset_is_true,
+    find_owned_agent,
+    strict_bool_confirm_reset,
+)
 from .auth_provider import (
     ClawdChatOAuthProvider,
     clawdchat_callback_handler,
@@ -76,6 +82,12 @@ from .tool_meta import (
 )
 
 logger = logging.getLogger(__name__)
+
+ConfirmResetParam = Annotated[
+    bool,
+    BeforeValidator(strict_bool_confirm_reset),
+    Field(description=CONFIRM_RESET_FIELD_DESCRIPTION),
+]
 
 
 class ClawdChatFastMCP(FastMCP):
@@ -359,17 +371,21 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             description=(
                 "Start browser sign-in or select an owned agent after sign-in.\n"
                 "Parameters:\n"
-                "- agent_id: optional UUID of an owned agent to bind to this session"
+                "- agent_id: optional UUID of an owned agent to bind to this session\n"
+                f"- confirm_reset: {CONFIRM_RESET_FIELD_DESCRIPTION}"
             ),
             annotations=write_annotations(AUTHENTICATE_TITLE),
         )
-        async def authenticate(agent_id: Optional[str] = None) -> str:
+        async def authenticate(
+            agent_id: Optional[str] = None,
+            confirm_reset: ConfirmResetParam = False,
+        ) -> str:
             """Authenticate with ClawdChat via browser OAuth."""
             from .stdio_auth import stdio_auth
 
-            # Agent switch: have JWT + agents list, select directly without re-auth
+            # Agent bind after login: JWT is not Agent authorization.
             if agent_id and stdio_auth.jwt and stdio_auth.agents:
-                result = stdio_auth.select_agent(agent_id)
+                result = stdio_auth.select_agent(agent_id, confirm_reset=confirm_reset)
                 return _format_result(result)
 
             # Already authenticated → return current info
@@ -1343,22 +1359,14 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "Parameters:\n"
             "- action: switch (default)\n"
             "- agent_id: target agent UUID\n"
-            "- confirm_reset: Set to true to generate and bind a new API key when the target agent does not have a stored key."
+            f"- confirm_reset: {CONFIRM_RESET_FIELD_DESCRIPTION}"
         ),
         annotations=write_annotations(SWITCH_AGENT_TITLE),
     )
     async def switch_agent(
         action: Literal["switch"] = "switch",
         agent_id: Optional[str] = None,
-        confirm_reset: Annotated[
-            bool,
-            Field(
-                description=(
-                    "Set to true to generate and bind a new API key when the target "
-                    "agent does not have a stored key."
-                ),
-            ),
-        ] = False,
+        confirm_reset: ConfirmResetParam = False,
     ) -> str:
         """Switch the active agent."""
         if action in ("current", "list"):
@@ -1387,7 +1395,7 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                 return "Error: agent_id is required"
 
             if use_stdio:
-                result = stdio_auth.select_agent(agent_id)
+                result = stdio_auth.select_agent(agent_id, confirm_reset=confirm_reset)
                 return _format_result(result)
 
             if token_data and not token_data.user_jwt:
@@ -1410,16 +1418,22 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             user_client = ClawdChatUserClient(
                 settings.clawdchat_api_url, token_data.user_jwt
             )
+            confirmed = confirm_reset_is_true(confirm_reset)
 
             try:
+                agents_result = await user_client.get_my_agents()
+                owned = find_owned_agent(agents_result.get("agents"), agent_id)
+                if not owned:
+                    return f"Error: Agent ID '{agent_id}' is not in the owned agent list"
+                agent_id = str(owned.get("id") or agent_id)
                 cred = await user_client.get_agent_credentials(agent_id)
                 api_key = cred.get("api_key")
-                agent_name = cred.get("agent_name", "")
+                agent_name = cred.get("agent_name") or owned.get("name") or ""
             except ClawdChatAPIError as e:
                 return f"Error: {e.detail}"
 
             if not api_key:
-                if not confirm_reset:
+                if not confirmed:
                     return _format_result({
                         "needs_reset": True,
                         "agent_id": agent_id,

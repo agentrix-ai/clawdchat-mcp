@@ -64,7 +64,8 @@ def test_templates_use_clawdchat_logo_not_placeholder(name: str) -> None:
     import clawdchat_mcp
 
     html = (Path(clawdchat_mcp.__file__).parent / "templates" / name).read_text()
-    assert '<img src="/logo.png" alt="ClawdChat"' in html
+    assert "/logo.png" in html
+    assert 'alt="ClawdChat"' in html
     assert 'rel="icon"' in html
     assert PLACEHOLDER_PATH not in html
     assert "#6366f1, #8b5cf6" not in html
@@ -76,7 +77,8 @@ def test_stdio_auth_page_uses_logo() -> None:
     import clawdchat_mcp
 
     src = (Path(clawdchat_mcp.__file__).parent / "stdio_auth.py").read_text()
-    assert ICON_URL in src
+    assert "ICON_URL" in src
+    assert "logo_src=ICON_URL" in src
     assert PLACEHOLDER_PATH not in src
 
 

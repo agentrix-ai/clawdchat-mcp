@@ -7,26 +7,38 @@ Flow:
 1. authenticate tool → start temp HTTP server → return auth URL
 2. User opens URL in browser → completes login on ClawdChat
 3. ClawdChat redirects to temp server → callback exchanges code for JWT
-4. Single agent: auto-select → show success page
-5. Multiple agents: show agent selection page → user picks → show success page
-6. Subsequent tool calls use the obtained agent API key
+4. 0 agents: error page (no default Agent is created)
+5. 1 or many agents: confirmation page — login JWT is not Agent authorization
+6. Missing stored key requires confirm_reset=true (boolean) before reset-key
+7. Subsequent tool calls use the bound agent API key in this process
 """
 
-import html
 import json
 import logging
 import secrets
 import socket
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Optional
-from urllib.parse import urlencode, urlparse, parse_qs
+from typing import Any, Optional
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
+from .auth_confirm import (
+    AGENT_NOT_OWNED,
+    ConfirmResetTypeError,
+    confirm_reset_from_mapping,
+    find_owned_agent,
+    parse_confirm_reset,
+)
 from .config import settings
+from .discovery import ICON_URL
 
 logger = logging.getLogger(__name__)
+
+
+def _stdio_is_cn() -> bool:
+    return "clawdchat.cn" in (settings.clawdchat_api_url or "").lower()
 
 
 def _find_free_port() -> int:
@@ -52,181 +64,24 @@ def _build_result_page(title: str, message: str, error: bool = False) -> str:
     )
 
 
-def _build_agent_selection_page(agents: list) -> str:
-    """Build the agent selection page HTML (consistent with HTTP mode style)."""
-    # Build agent list items
-    agent_items = ""
-    for agent in agents:
-        name = html.escape(agent.get("name", ""))
-        agent_id = html.escape(agent.get("id", ""))
-        desc = html.escape((agent.get("description") or "")[:80])
-        initial = html.escape(name[0].upper() if name else "?")
-        karma = agent.get("karma", 0)
-        posts = agent.get("post_count", 0)
-        followers = agent.get("follower_count", 0)
+def _render_selection_page(agents: list) -> str:
+    from .auth_provider import render_select_agent_html
 
-        desc_html = f'<div class="agent-desc">{desc}</div>' if desc else ""
-        agent_items += f"""
-        <li class="agent-item" data-id="{agent_id}" data-name="{name}" onclick="selectAgent(this)">
-            <div class="agent-avatar">{initial}</div>
-            <div class="agent-info">
-                <div class="agent-name">{name}</div>
-                {desc_html}
-                <div class="agent-stats">{posts} 帖子 · {followers} 粉丝 · karma {karma}</div>
-            </div>
-            <div class="agent-check"></div>
-        </li>"""
-
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>选择 Agent · ClawdChat MCP</title>
-<style>
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: #f0f2f5; min-height: 100vh;
-    display: flex; align-items: center; justify-content: center;
-}}
-.auth-container {{ width: 480px; max-width: 92vw; }}
-.auth-header {{ text-align: center; margin-bottom: 24px; }}
-.auth-logo {{
-    width: 48px; height: 48px;
-    overflow: hidden;
-    border-radius: 12px; display: inline-flex;
-    align-items: center; justify-content: center; margin-bottom: 16px;
-}}
-.auth-logo img {{ width: 48px; height: 48px; display: block; }}
-.auth-header h1 {{ font-size: 22px; font-weight: 600; color: #1a1a2e; margin-bottom: 6px; }}
-.auth-header p {{ font-size: 14px; color: #6b7280; line-height: 1.5; }}
-.auth-card {{
-    background: white; border: 1px solid #e5e7eb; border-radius: 12px;
-    padding: 32px; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-}}
-.agent-list {{ list-style: none; margin-bottom: 20px; }}
-.agent-item {{
-    display: flex; align-items: center; padding: 14px 16px;
-    border: 1px solid #e5e7eb; border-radius: 10px; margin-bottom: 8px;
-    cursor: pointer; transition: all 0.15s;
-}}
-.agent-item:hover {{ border-color: #a5b4fc; background: #f5f3ff; }}
-.agent-item.selected {{ border-color: #6366f1; background: #eef2ff; box-shadow: 0 0 0 1px #6366f1; }}
-.agent-avatar {{
-    width: 42px; height: 42px; border-radius: 50%;
-    overflow: hidden;
-    display: flex; align-items: center; justify-content: center;
-    color: white; font-size: 17px; font-weight: 600;
-    margin-right: 14px; flex-shrink: 0;
-}}
-.agent-info {{ flex: 1; min-width: 0; }}
-.agent-name {{ font-weight: 600; color: #111827; font-size: 14px; }}
-.agent-desc {{ color: #6b7280; font-size: 12px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-.agent-stats {{ color: #9ca3af; font-size: 11px; margin-top: 2px; }}
-.agent-check {{
-    width: 20px; height: 20px; border-radius: 50%; border: 2px solid #d1d5db;
-    flex-shrink: 0; margin-left: 12px; display: flex;
-    align-items: center; justify-content: center; transition: all 0.15s;
-}}
-.agent-item.selected .agent-check {{ border-color: #6366f1; background: #6366f1; }}
-.agent-item.selected .agent-check::after {{ content: ''; width: 6px; height: 6px; background: white; border-radius: 50%; }}
-.btn {{
-    width: 100%; padding: 12px; border: none; border-radius: 8px;
-    font-size: 14px; font-weight: 600; cursor: pointer; transition: all 0.15s;
-}}
-.btn-primary {{ background: #6366f1; color: white; }}
-.btn-primary:hover {{ background: #4f46e5; }}
-.btn-primary:disabled {{ opacity: 0.4; cursor: not-allowed; }}
-.error-msg {{
-    background: #fef2f2; border: 1px solid #fecaca; color: #dc2626;
-    padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; display: none;
-}}
-.auth-footer {{ text-align: center; margin-top: 20px; font-size: 12px; color: #9ca3af; line-height: 1.6; }}
-.auth-footer a {{ color: #6366f1; text-decoration: none; }}
-.spinner {{
-    display: inline-block; width: 14px; height: 14px;
-    border: 2px solid rgba(255,255,255,0.3); border-top-color: white;
-    border-radius: 50%; animation: spin 0.6s linear infinite;
-    margin-right: 6px; vertical-align: middle;
-}}
-@keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-</style>
-</head>
-<body>
-<div class="auth-container">
-    <div class="auth-header">
-        <div class="auth-logo">
-            <img src="https://clawdchat.ai/logo-center.png" alt="ClawdChat" width="48" height="48">
-        </div>
-        <h1>选择 Agent</h1>
-        <p>选择一个 Agent 作为 MCP 客户端的操作身份</p>
-    </div>
-    <div class="auth-card">
-        <div class="error-msg" id="error"></div>
-        <ul class="agent-list" id="agentList">{agent_items}
-        </ul>
-        <button class="btn btn-primary" id="confirmBtn" onclick="confirmSelection()" disabled>
-            授权此 Agent
-        </button>
-    </div>
-    <div class="auth-footer">
-        授权后 MCP 客户端将以此 Agent 身份操作<br>
-        <a href="https://clawdchat.ai" target="_blank">ClawdChat</a> · AI Agent 社交网络
-    </div>
-</div>
-<script>
-let selectedId = null, selectedName = null;
-function selectAgent(el) {{
-    document.querySelectorAll('.agent-item').forEach(i => i.classList.remove('selected'));
-    el.classList.add('selected');
-    selectedId = el.dataset.id;
-    selectedName = el.dataset.name;
-    document.getElementById('confirmBtn').disabled = false;
-}}
-async function confirmSelection() {{
-    if (!selectedId) return;
-    const btn = document.getElementById('confirmBtn');
-    const err = document.getElementById('error');
-    err.style.display = 'none';
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span>授权中...';
-    try {{
-        const r = await fetch('/select', {{
-            method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{agent_id: selectedId, agent_name: selectedName}})
-        }});
-        const data = await r.json();
-        if (data.success) {{
-            document.body.innerHTML = `
-                <div style="font-family:-apple-system,sans-serif;text-align:center;padding-top:80px;background:#f0f2f5;min-height:100vh;">
-                <div style="background:white;max-width:480px;margin:0 auto;padding:48px 32px;border-radius:12px;border:1px solid #e5e7eb;">
-                <h1 style="color:#22c55e;font-size:22px;">&#9989; 认证成功</h1>
-                <p style="color:#6b7280;margin-top:16px;font-size:14px;">
-                已选择 Agent「${{data.agent_name}}」，你可以关闭此窗口，返回 MCP 客户端继续使用。</p>
-                </div></div>`;
-        }} else {{
-            err.textContent = data.error || '选择失败';
-            err.style.display = 'block';
-        }}
-    }} catch (e) {{
-        err.textContent = '网络错误，请重试';
-        err.style.display = 'block';
-    }} finally {{
-        btn.disabled = false;
-        btn.textContent = '授权此 Agent';
-    }}
-}}
-</script>
-</body></html>"""
+    return render_select_agent_html(
+        state="",
+        agents=agents,
+        is_cn=_stdio_is_cn(),
+        select_url="/select",
+        logo_src=ICON_URL,
+    )
 
 
 class StdioAuthManager:
     """Manages OAuth authentication for stdio mode via browser.
 
-    Supports both single-agent (auto-select) and multi-agent (browser selection page)
-    flows, with UX consistent with HTTP mode.
+    Login always stops at the Agent confirmation page. A stored key is bound
+    only after an explicit select POST; missing keys rotate only when
+    confirm_reset is the boolean True.
     """
 
     def __init__(self):
@@ -242,38 +97,34 @@ class StdioAuthManager:
 
     @property
     def is_authenticated(self) -> bool:
-        """Has a valid agent API key."""
+        """Has a valid agent API key bound for this process."""
         return bool(self.api_key)
 
     @property
     def needs_agent_selection(self) -> bool:
-        """JWT obtained but multiple agents, needs user selection."""
-        return bool(self.jwt) and not self.api_key and len(self.agents) > 1
+        """JWT obtained but this round has not confirmed an Agent yet."""
+        return bool(self.jwt) and not self.api_key and len(self.agents) >= 1
 
     def get_auth_url(self) -> str:
         """Start a temp HTTP server and return the auth URL for user to open.
 
         The temp server handles the full auth flow:
         - /callback: receives OAuth redirect, exchanges code for JWT
-        - /select: shows agent selection page (multi-agent) and processes selection
+        - /select: shows agent confirmation page and processes selection
         """
-        # Clean up any previous server
         self._shutdown_server()
         self._auth_complete.clear()
         self._error = ""
 
-        # Find a free port for the callback
         self._port = _find_free_port()
         callback_url = f"http://127.0.0.1:{self._port}/callback"
 
-        # Build ClawdChat external auth URL
         state = secrets.token_urlsafe(16)
         auth_url = (
             f"{settings.clawdchat_api_url}/api/v1/auth/external/authorize?"
             + urlencode({"callback_url": callback_url, "state": state})
         )
 
-        # Start temp HTTP server in background thread
         manager = self
 
         class CallbackHandler(BaseHTTPRequestHandler):
@@ -295,12 +146,12 @@ class StdioAuthManager:
                     self.send_error(404)
 
             def _handle_callback(self, parsed):
-                """Handle OAuth callback: exchange code → auto-select or show selection page."""
+                """Exchange code for JWT, then always show the confirmation page."""
                 params = parse_qs(parsed.query)
                 code = params.get("code", [""])[0]
 
                 if not code:
-                    self._send_html(_build_result_page("认证失败", "缺少必要参数", error=True))
+                    self._send_html(_build_result_page("Sign-in failed", "Missing code parameter", error=True))
                     manager._error = "Callback is missing the code parameter"
                     manager._auth_complete.set()
                     return
@@ -309,55 +160,71 @@ class StdioAuthManager:
                     manager._do_auth_exchange(code)
                 except Exception as e:
                     logger.exception("Stdio auth exchange failed")
-                    self._send_html(_build_result_page("认证失败", str(e), error=True))
+                    self._send_html(_build_result_page("Sign-in failed", str(e), error=True))
                     manager._error = str(e)
                     manager._auth_complete.set()
                     return
 
-                if manager.is_authenticated:
-                    # Single agent, auto-selected
+                if not manager.agents:
                     self._send_html(_build_result_page(
-                        "认证成功",
-                        f"已选择 Agent「{manager.agent_name}」，"
-                        "你可以关闭此窗口，返回 MCP 客户端继续使用。"
+                        "No Agent",
+                        "No claimed agents found. Claim an agent on ClawdChat first.",
+                        error=True,
                     ))
+                    manager._error = "No claimed agents found. Claim an agent on ClawdChat first."
                     manager._auth_complete.set()
-                else:
-                    # Multiple agents → show selection page (don't set _auth_complete yet)
-                    self._send_html(_build_agent_selection_page(manager.agents))
+                    return
+
+                # 1 or many: confirmation page. JWT is not Agent authorization.
+                self._send_html(_render_selection_page(manager.agents))
 
             def _handle_select_page(self):
-                """GET /select - Show agent selection page."""
+                """GET /select - Show agent confirmation page."""
                 if not manager.agents:
-                    self._send_html(_build_result_page("错误", "Agent 列表为空", error=True))
+                    self._send_html(_build_result_page("Error", "Agent list is empty", error=True))
                     return
-                self._send_html(_build_agent_selection_page(manager.agents))
+                self._send_html(_render_selection_page(manager.agents))
 
             def _handle_select_submit(self):
-                """POST /select - Process agent selection from browser page."""
+                """POST /select - Process explicit Agent confirmation."""
                 content_length = int(self.headers.get("Content-Length", 0))
                 body = self.rfile.read(content_length)
 
                 try:
                     data = json.loads(body)
                 except Exception:
-                    self._send_json({"error": "无效的请求"}, 400)
+                    self._send_json({"error": "Invalid request body"}, 400)
+                    return
+
+                if not isinstance(data, dict):
+                    self._send_json({"error": "Invalid request body"}, 400)
+                    return
+
+                try:
+                    confirm_reset = confirm_reset_from_mapping(data)
+                except ConfirmResetTypeError as e:
+                    self._send_json({"error": str(e)}, 422)
                     return
 
                 agent_id = data.get("agent_id", "")
                 if not agent_id:
-                    self._send_json({"error": "缺少 agent_id"}, 400)
+                    self._send_json({"error": "Missing agent_id"}, 400)
                     return
 
-                result = manager.select_agent(agent_id)
+                result = manager.select_agent(agent_id, confirm_reset=confirm_reset)
                 if result.get("status") == "authenticated":
                     self._send_json({
                         "success": True,
+                        "status": "authenticated",
                         "agent_name": result.get("agent_name", ""),
                     })
                     manager._auth_complete.set()
+                elif result.get("needs_reset"):
+                    self._send_json(result)
+                elif "not in the owned" in str(result.get("error", "")).lower() or result.get("error") == AGENT_NOT_OWNED:
+                    self._send_json(result, 403)
                 else:
-                    self._send_json({"error": result.get("error", "选择失败")}, 400)
+                    self._send_json({"error": result.get("error", "Selection failed")}, 400)
 
             def _send_html(self, content: str):
                 self.send_response(200)
@@ -382,10 +249,9 @@ class StdioAuthManager:
         return auth_url
 
     def _do_auth_exchange(self, code: str):
-        """Exchange auth code for JWT → fetch agents → auto-select if single (synchronous)."""
+        """Exchange auth code for JWT and fetch agents. Never auto-select."""
         api_url = settings.clawdchat_api_url
 
-        # 1. Exchange code for JWT
         r = httpx.post(
             f"{api_url}/api/v1/auth/external/token",
             json={"code": code},
@@ -399,7 +265,6 @@ class StdioAuthManager:
         if not self.jwt:
             raise RuntimeError("Server did not return a JWT")
 
-        # 2. Fetch user's agents
         r = httpx.get(
             f"{api_url}/api/v1/users/me/agents",
             cookies={"clawdchat_token": self.jwt},
@@ -412,55 +277,91 @@ class StdioAuthManager:
         if not self.agents:
             raise RuntimeError("No claimed agents found. Claim an agent on ClawdChat first.")
 
-        # 3. Auto-select if single agent
-        if len(self.agents) == 1:
-            self._select_agent_sync(self.agents[0]["id"], self.agents[0].get("name", ""))
+        logger.info(f"Stdio auth: login ok, {len(self.agents)} agent(s); waiting for confirmation")
 
-        logger.info(f"Stdio auth: login ok, {len(self.agents)} agent(s)")
-
-    def _select_agent_sync(self, agent_id: str, agent_name: str = ""):
-        """Select an agent and get its API key (synchronous)."""
+    def _get_stored_key(self, agent_id: str) -> Optional[str]:
         api_url = settings.clawdchat_api_url
-        cookies = {"clawdchat_token": self.jwt}
-
-        # Get credentials
         r = httpx.get(
             f"{api_url}/api/v1/users/me/agents/{agent_id}/credentials",
-            cookies=cookies,
+            cookies={"clawdchat_token": self.jwt},
             timeout=10.0,
         )
         if r.status_code != 200:
             raise RuntimeError(f"Failed to fetch credentials: {r.text}")
+        return r.json().get("api_key") or None
 
-        api_key = r.json().get("api_key")
+    def _reset_key(self, agent_id: str) -> Optional[str]:
+        api_url = settings.clawdchat_api_url
+        r = httpx.post(
+            f"{api_url}/api/v1/users/me/agents/{agent_id}/reset-key",
+            cookies={"clawdchat_token": self.jwt},
+            timeout=10.0,
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"Failed to reset API key: {r.text}")
+        return r.json().get("api_key") or None
 
-        # If no key, try reset
-        if not api_key:
-            r = httpx.post(
-                f"{api_url}/api/v1/users/me/agents/{agent_id}/reset-key",
-                cookies=cookies,
-                timeout=10.0,
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"Failed to reset API key: {r.text}")
-            api_key = r.json().get("api_key")
-
-        if not api_key:
-            raise RuntimeError(f"Unable to obtain an API key for agent '{agent_name}'")
-
+    def _bind_agent(self, agent_id: str, agent_name: str, api_key: str) -> None:
         self.api_key = api_key
         self.agent_id = agent_id
         self.agent_name = agent_name
         logger.info(f"Stdio auth: selected agent '{agent_name}' ({agent_id})")
 
-    def select_agent(self, agent_id: str) -> dict:
-        """Select an agent from the list (called from browser page or authenticate tool)."""
-        agent = next((a for a in self.agents if a["id"] == agent_id), None)
+    def select_agent(self, agent_id: str, confirm_reset: Any = False) -> dict:
+        """Bind an owned agent after explicit confirmation.
+
+        Does not rotate or deliver a key unless the target has a stored key,
+        or confirm_reset is the boolean True. Cancel / omit / false / string
+        truthy leave the current session binding unchanged.
+        """
+        try:
+            confirmed = (
+                False
+                if confirm_reset is False
+                else parse_confirm_reset(confirm_reset, present=True)
+            )
+        except ConfirmResetTypeError as e:
+            return {"error": str(e)}
+
+        agent = find_owned_agent(self.agents, agent_id)
         if not agent:
             return {"error": f"Agent ID '{agent_id}' is not in the owned agent list"}
 
+        owned_id = str(agent.get("id") or agent_id)
+        owned_name = str(agent.get("name") or "")
+
         try:
-            self._select_agent_sync(agent_id, agent.get("name", ""))
+            api_key = self._get_stored_key(owned_id)
+            if api_key:
+                self._bind_agent(owned_id, owned_name, api_key)
+                return {
+                    "status": "authenticated",
+                    "message": f"Selected agent '{self.agent_name}'",
+                    "agent_id": self.agent_id,
+                    "agent_name": self.agent_name,
+                }
+
+            if not confirmed:
+                return {
+                    "needs_reset": True,
+                    "agent_id": owned_id,
+                    "agent_name": owned_name,
+                    "message": (
+                        f"Agent '{owned_name}' has no stored API key. "
+                        "Set confirm_reset=true to generate and bind a new key. "
+                        "Any previous key will stop working."
+                    ),
+                    "warning": (
+                        f"Agent '{owned_name}' has no stored API key. "
+                        "Set confirm_reset=true to generate and bind a new key. "
+                        "Any previous key will stop working."
+                    ),
+                }
+
+            api_key = self._reset_key(owned_id)
+            if not api_key:
+                return {"error": f"Unable to obtain an API key for agent '{owned_name}'"}
+            self._bind_agent(owned_id, owned_name, api_key)
             return {
                 "status": "authenticated",
                 "message": f"Selected agent '{self.agent_name}'",
