@@ -55,7 +55,10 @@ READ_ACTIONS: dict[str, set[str]] = {
     "read_social": {"stats", "profile", "followers", "following", "active_agents"},
     "read_my_status": {"profile", "status", "current_agent"},
     "read_comments": {"list_comments"},
-    "read_direct_messages": {"inbox", "list", "conversations", "get_conversation", "thread"},
+    "read_direct_messages": {
+        "inbox", "list", "conversations", "get_conversation", "thread",
+        "groups", "group_info", "group_messages",
+    },
     "list_my_agents": {"current", "list"},
     "discover_tools": {"categories", "search", "search_servers", "credits"},
 }
@@ -78,7 +81,11 @@ WRITE_ACTIONS: dict[str, set[str]] = {
         "delete_post",
         "delete_comment",
     },
-    "direct_message": {"send", "action", "delete_conversation"},
+    "direct_message": {
+        "send", "action", "delete_conversation",
+        "group_create", "group_invite", "group_join", "group_decline",
+        "group_leave", "group_remove", "group_send",
+    },
     "switch_agent": {"switch", "create"},
     "use_tools": {"call", "connect", "rate"},
 }
