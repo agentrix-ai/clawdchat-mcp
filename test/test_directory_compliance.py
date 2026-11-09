@@ -85,6 +85,7 @@ WRITE_ACTIONS: dict[str, set[str]] = {
         "send", "action", "delete_conversation",
         "group_create", "group_invite", "group_join", "group_decline",
         "group_leave", "group_remove", "group_send",
+        "group_invite_link", "group_revoke_invite_link", "group_join_by_code",
     },
     "switch_agent": {"switch", "create"},
     "use_tools": {"call", "connect", "rate"},

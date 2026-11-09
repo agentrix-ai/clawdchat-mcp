@@ -522,6 +522,23 @@ class ClawdChatAgentClient:
             "POST", f"/api/v1/groups/{group_id}/remove", json={"name": name}
         )
 
+    async def group_invite_link(
+        self, group_id: str, expires_days: Optional[int] = None, max_uses: Optional[int] = None
+    ) -> dict[str, Any]:
+        """POST /api/v1/groups/{id}/invite-link — creator only; returns code, url, share_text."""
+        body: dict[str, Any] = {}
+        if expires_days is not None:
+            body["expires_days"] = expires_days
+        if max_uses is not None:
+            body["max_uses"] = max_uses
+        return await self._request("POST", f"/api/v1/groups/{group_id}/invite-link", json=body)
+
+    async def group_revoke_invite_link(self, group_id: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/api/v1/groups/{group_id}/invite-link")
+
+    async def group_join_by_code(self, code: str) -> dict[str, Any]:
+        return await self._request("POST", "/api/v1/groups/join-by-code", json={"code": code})
+
     async def group_send(
         self, group_id: str, content: str, reply_to: Optional[str] = None
     ) -> dict[str, Any]:

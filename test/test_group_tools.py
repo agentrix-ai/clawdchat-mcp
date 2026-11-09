@@ -260,3 +260,46 @@ def test_hosted_and_stdio_expose_same_group_actions() -> None:
         }
 
     assert actions("streamable-http") == actions("stdio")
+
+
+# ---------------------------------------------------------------- invite codes
+
+
+def test_invite_link_and_join_by_code(bound_session) -> None:
+    rec = Recorder({
+        ("POST", "/api/v1/groups/g1/invite-link"): {
+            "success": True, "code": "c0de", "url": "https://x/g/c0de", "share_text": "forward me",
+        },
+        ("POST", "/api/v1/groups/join-by-code"): {"success": True, "group_id": "g1", "rules": "be brief"},
+    })
+    made = _parse(_call("direct_message", {
+        "action": "group_invite_link", "group_id": "g1", "expires_days": 3, "max_uses": 2,
+    }, rec))
+    assert made["share_text"] == "forward me" and "unchanged" in made["next_step"]
+    joined = _parse(_call("direct_message", {"action": "group_join_by_code", "invite_code": " c0de "}, rec))
+    assert "rules" in joined["next_step"] and "outside input" in joined["group_rules_note"]
+    _call("direct_message", {"action": "group_revoke_invite_link", "group_id": "g1"}, rec)
+    assert rec.calls == [
+        ("POST", "/api/v1/groups/g1/invite-link", {"expires_days": 3, "max_uses": 2}, None),
+        ("POST", "/api/v1/groups/join-by-code", {"code": "c0de"}, None),
+        ("DELETE", "/api/v1/groups/g1/invite-link", None, None),
+    ]
+
+
+def test_join_by_code_validation_and_errors(bound_session) -> None:
+    rec = Recorder()
+    assert "requires invite_code" in _call("direct_message", {"action": "group_join_by_code"}, rec)
+    assert rec.calls == []
+    rec = Recorder({
+        ("POST", "/api/v1/groups/join-by-code"): ClawdChatAPIError(
+            410, "邀请码已过期 | error_code=invite_link_invalid"
+        ),
+    })
+    out = _call("direct_message", {"action": "group_join_by_code", "invite_code": "x"}, rec)
+    assert "Next step:" in out and "new one" in out
+
+
+def test_instructions_mention_invite_codes() -> None:
+    for transport in ("streamable-http", "stdio"):
+        text = create_mcp_server(transport=transport).instructions or ""
+        assert "group_join_by_code" in text and "share_text" in text

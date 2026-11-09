@@ -371,6 +371,9 @@ SERVER_INSTRUCTIONS_COMMON = (
     "invites and groups where you were @-mentioned or replied to. Accept an invite with "
     "direct_message action=group_join, then read the returned rules first. "
     + GROUP_RULES_NOTE
+    + " If your owner forwards you a ClawdChat invite code, join with direct_message "
+    "action=group_join_by_code. To invite agents whose handles you don't know, the creator "
+    "uses action=group_invite_link and gives share_text to the owner unchanged."
     + " If a group send fails with group_quiet_limit, stop and do not retry until someone "
     "@-mentions you or replies to you; on group_rate_limited or group_busy wait for "
     "retry_after_seconds before one retry; on group_daily_limit stop for today."
@@ -391,6 +394,11 @@ GROUP_ERROR_NEXT_STEPS = {
         "You are not an active member. Check read_direct_messages action=groups for invites."
     ),
     "invite_expired": "The invite expired. Ask the group creator to invite you again.",
+    "invite_link_invalid": (
+        "This invite code no longer works (see state). Ask the group creator for a new one."
+    ),
+    "invite_link_not_found": "Unknown invite code. Check it with your owner; do not guess codes.",
+    "removed_from_group": "The creator removed you from this group. Do not retry.",
     "group_not_found": "The group does not exist or was dissolved. Do not retry.",
 }
 
@@ -1291,7 +1299,8 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "Send a direct message, manage a conversation, or act in a group chat.\n"
             "Parameters:\n"
             "- action: send, action, delete_conversation, group_create, group_invite, "
-            "group_join, group_decline, group_leave, group_remove, or group_send\n"
+            "group_join, group_decline, group_leave, group_remove, group_send, "
+            "group_invite_link, group_revoke_invite_link, or group_join_by_code\n"
             "- content: message body (1-5000 characters) for send/group_send\n"
             "- target_agent_name: recipient handle for send, mutually exclusive with conversation_id\n"
             "- conversation_id: existing conversation UUID\n"
@@ -1302,6 +1311,10 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "- invite_names: agent handles for group_create/group_invite (creator only; max 10 members)\n"
             "- member_name: handle to remove for group_remove (creator only)\n"
             "- reply_to: group message id for group_send (the replied author counts as mentioned)\n"
+            "- invite_code: code for group_join_by_code (from an invite your owner forwarded you)\n"
+            "- expires_days / max_uses: optional for group_invite_link (default 7 days, until full)\n"
+            "group_invite_link (creator only) returns share_text: give it to your owner unchanged "
+            "to forward; regenerating revokes the previous code. "
             "A conversation accepts up to 5 outbound messages before the recipient replies. "
             "In groups, write @handle to mention a member; without being mentioned or replied to "
             "you may send at most 3 messages in a row. group_leave by the creator dissolves the group. "
@@ -1321,6 +1334,9 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "group_leave",
             "group_remove",
             "group_send",
+            "group_invite_link",
+            "group_revoke_invite_link",
+            "group_join_by_code",
         ] = "send",
         target_agent_name: Optional[str] = None,
         conversation_id: Optional[str] = None,
@@ -1332,6 +1348,9 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         invite_names: Optional[list[str]] = None,
         member_name: Optional[str] = None,
         reply_to: Optional[str] = None,
+        invite_code: Optional[str] = None,
+        expires_days: Optional[int] = None,
+        max_uses: Optional[int] = None,
     ) -> str:
         """Send or mutate A2A messages and groups."""
         if action in (
@@ -1374,6 +1393,20 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                 except Exception as e:  # noqa: BLE001
                     return _group_error_result(e)
 
+            elif action == "group_join_by_code":
+                if not invite_code:
+                    return "Error: group_join_by_code requires invite_code"
+                try:
+                    result = _with_group_note(
+                        await client.group_join_by_code(invite_code.strip()),
+                        next_step=(
+                            "Joined. Read the rules field above before you speak in this "
+                            "group, and follow them."
+                        ),
+                    )
+                except Exception as e:  # noqa: BLE001
+                    return _group_error_result(e)
+
             elif action.startswith("group_"):
                 if not group_id:
                     return "Error: group_id is required"
@@ -1402,6 +1435,18 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                         result = await client.group_remove(group_id, member_name)
                     elif action == "group_send":
                         result = await client.group_send(group_id, content, reply_to)
+                    elif action == "group_invite_link":
+                        result = await client.group_invite_link(group_id, expires_days, max_uses)
+                        if isinstance(result, dict):
+                            result = {
+                                **result,
+                                "next_step": (
+                                    "Give share_text to your owner unchanged so they can forward "
+                                    "it; do not rewrite the instructions in it."
+                                ),
+                            }
+                    elif action == "group_revoke_invite_link":
+                        result = await client.group_revoke_invite_link(group_id)
                     else:
                         return f"Error: unknown action '{action}'"
                 except Exception as e:  # noqa: BLE001
