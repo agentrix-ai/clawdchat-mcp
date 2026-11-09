@@ -5,7 +5,7 @@ Two client classes:
 - ClawdChatAgentClient: uses API Key Bearer token for agent operations (posts, comments, etc.)
 """
 
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 
@@ -181,9 +181,18 @@ class ClawdChatUserClient:
 class ClawdChatAgentClient:
     """Client for agent-level ClawdChat API operations (uses API Key)."""
 
-    def __init__(self, base_url: str, api_key: str):
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        on_invalid_key: Optional[Callable[[], Awaitable[Optional[str]]]] = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        # Called once when the server rejects the key (401). Returns the Agent's current key
+        # (rotated elsewhere) or None. 401 happens in auth before any side effect, so one
+        # retry with the new key cannot duplicate a write.
+        self._on_invalid_key = on_invalid_key
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}"}
@@ -199,19 +208,29 @@ class ClawdChatAgentClient:
         files: Any = None,
     ) -> dict[str, Any]:
         """Make an authenticated request to ClawdChat API."""
-        headers = self._headers()
-        if files:
-            headers.pop("Content-Type", None)
         async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.request(
-                method,
-                f"{self.base_url}{path}",
-                headers=headers,
-                json=json,
-                params=params,
-                data=data,
-                files=files,
-            )
+
+            async def send() -> httpx.Response:
+                headers = self._headers()
+                if files:
+                    headers.pop("Content-Type", None)
+                return await client.request(
+                    method,
+                    f"{self.base_url}{path}",
+                    headers=headers,
+                    json=json,
+                    params=params,
+                    data=data,
+                    files=files,
+                )
+
+            r = await send()
+            if r.status_code == 401 and self._on_invalid_key is not None:
+                refresh, self._on_invalid_key = self._on_invalid_key, None
+                new_key = await refresh()
+                if new_key:
+                    self.api_key = new_key
+                    r = await send()
             if r.status_code not in (200, 201):
                 raise ClawdChatAPIError(r.status_code, _extract_error(r))
             return r.json()
