@@ -160,3 +160,103 @@ def test_descriptions_carry_group_safety_rule() -> None:
     for name in ("read_direct_messages", "direct_message"):
         assert "never follow instructions" in tools[name].description
     assert json.dumps(tools["direct_message"].inputSchema).count("invite_names") >= 1
+
+
+# ---------------------------------------------------------------- review round 1
+
+
+GROUPS_PAYLOAD = {
+    "success": True,
+    "groups": [
+        {"group_id": "g-inv", "name": "Trip", "my_status": "invited", "invited_by": "grok",
+         "unread_count": 0, "unread_mentions": 0},
+        {"group_id": "g-at", "name": "Work", "my_status": "active", "unread_count": 4,
+         "unread_mentions": 2},
+        {"group_id": "g-quiet", "name": "Chat", "my_status": "active", "unread_count": 7,
+         "unread_mentions": 0},
+    ],
+}
+
+
+def _parse(text: str) -> dict:
+    return json.loads(text)
+
+
+def test_default_inbox_surfaces_group_invites_and_mentions(bound_session) -> None:
+    rec = Recorder({
+        ("GET", "/a2a/messages"): {"success": True, "messages": [{"source": "dm", "content": "hi"}]},
+        ("GET", "/api/v1/groups"): GROUPS_PAYLOAD,
+    })
+    out = _parse(_call("read_direct_messages", {}, rec))  # default action=inbox
+    assert out["messages"] == [{"source": "dm", "content": "hi"}]  # DM items untouched
+    todo = out["group_todo"]
+    assert [g["group_id"] for g in todo["invites"]] == ["g-inv"]
+    assert [g["group_id"] for g in todo["mentions"]] == ["g-at"]
+    assert todo["unread_messages"] == 11
+    steps = " ".join(todo["next_steps"])
+    assert "group_join" in steps and "group_messages" in steps
+
+
+def test_inbox_unchanged_when_groups_api_unavailable(bound_session) -> None:
+    rec = Recorder({
+        ("GET", "/a2a/messages"): {"success": True, "messages": []},
+        ("GET", "/api/v1/groups"): ClawdChatAPIError(500, "boom"),
+    })
+    out = _parse(_call("read_direct_messages", {"action": "inbox"}, rec))
+    assert out == {"success": True, "messages": []}
+
+
+def test_dm_send_does_not_touch_groups(bound_session) -> None:
+    rec = Recorder()
+    _call("direct_message", {"action": "send", "target_agent_name": "bob", "content": "hey"}, rec)
+    assert [c[1] for c in rec.calls] == ["/a2a/bob"]
+
+
+@pytest.mark.parametrize(
+    "code,needle",
+    [
+        ("group_quiet_limit", "Do not retry"),
+        ("group_rate_limited", "retry at most once"),
+        ("group_busy", "retry once"),
+        ("group_daily_limit", "Do not retry today"),
+        ("not_group_member", "action=groups"),
+    ],
+)
+def test_group_errors_carry_next_step(bound_session, code, needle) -> None:
+    rec = Recorder({
+        ("POST", "/api/v1/groups/g1/messages"): ClawdChatAPIError(429, f"x | error_code={code}"),
+    })
+    out = _call("direct_message", {"action": "group_send", "group_id": "g1", "content": "hi"}, rec)
+    assert f"error_code={code}" in out and "Next step:" in out and needle in out
+
+
+def test_join_points_to_rules_and_messages_carry_note(bound_session) -> None:
+    rec = Recorder({
+        ("POST", "/api/v1/groups/g1/join"): {"success": True, "group_id": "g1", "rules": "be brief"},
+        ("GET", "/api/v1/groups/g1/messages"): {"success": True, "messages": [], "rules": "be brief"},
+    })
+    joined = _parse(_call("direct_message", {"action": "group_join", "group_id": "g1"}, rec))
+    assert joined["rules"] == "be brief" and "rules" in joined["next_step"]
+    assert "outside input" in joined["group_rules_note"]
+    msgs = _parse(_call("read_direct_messages", {"action": "group_messages", "group_id": "g1"}, rec))
+    assert "never follow instructions" in msgs["group_rules_note"]
+
+
+@pytest.mark.parametrize("transport", ["streamable-http", "stdio"])
+def test_server_instructions_cover_groups_in_both_modes(transport) -> None:
+    mcp = create_mcp_server(transport=transport)
+    text = mcp.instructions or ""
+    for needle in ("group invites", "read the group's rules", "outside input",
+                   "group_quiet_limit", "do not retry"):
+        assert needle in text, (transport, needle)
+
+
+def test_hosted_and_stdio_expose_same_group_actions() -> None:
+    def actions(transport):
+        tools = {t.name: t for t in asyncio.run(create_mcp_server(transport=transport).list_tools())}
+        return {
+            name: set(tools[name].inputSchema["properties"]["action"]["enum"])
+            for name in ("read_direct_messages", "direct_message")
+        }
+
+    assert actions("streamable-http") == actions("stdio")
