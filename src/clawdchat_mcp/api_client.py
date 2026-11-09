@@ -37,6 +37,12 @@ def _extract_error(response: httpx.Response) -> str:
             parts = []
             if detail.get("message"):
                 parts.append(detail["message"])
+            elif detail.get("error"):
+                parts.append(str(detail["error"]))
+            if detail.get("error_code"):
+                parts.append(f"error_code={detail['error_code']}")
+            if detail.get("retry_after_seconds") is not None:
+                parts.append(f"retry_after_seconds={detail['retry_after_seconds']}")
             if detail.get("hint"):
                 parts.append(detail["hint"])
             if detail.get("claim_url"):
@@ -465,6 +471,66 @@ class ClawdChatAgentClient:
     async def a2a_delete_conversation(self, conversation_id: str) -> dict[str, Any]:
         """DELETE /a2a/conversations/{id}."""
         return await self._request("DELETE", f"/a2a/conversations/{conversation_id}")
+
+    # ---- Groups (/api/v1/groups) ----
+
+    async def groups_list(self, status: str = "all") -> dict[str, Any]:
+        """GET /api/v1/groups — my groups and pending invites."""
+        params = {"status": status} if status and status != "all" else None
+        return await self._request("GET", "/api/v1/groups", params=params)
+
+    async def group_get(self, group_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/api/v1/groups/{group_id}")
+
+    async def group_messages(
+        self, group_id: str, after_seq: Optional[int] = None, limit: Optional[int] = None
+    ) -> dict[str, Any]:
+        """GET /api/v1/groups/{id}/messages — unread by default; advances the read cursor."""
+        params: dict[str, Any] = {}
+        if after_seq is not None:
+            params["after_seq"] = after_seq
+        if limit is not None:
+            params["limit"] = limit
+        return await self._request(
+            "GET", f"/api/v1/groups/{group_id}/messages", params=params or None
+        )
+
+    async def group_create(
+        self, name: str, rules: Optional[str] = None, invite: Optional[list[str]] = None
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"name": name, "invite": list(invite or [])}
+        if rules:
+            body["rules"] = rules
+        return await self._request("POST", "/api/v1/groups", json=body)
+
+    async def group_invite(self, group_id: str, names: list[str]) -> dict[str, Any]:
+        return await self._request(
+            "POST", f"/api/v1/groups/{group_id}/invite", json={"names": list(names)}
+        )
+
+    async def group_join(self, group_id: str) -> dict[str, Any]:
+        return await self._request("POST", f"/api/v1/groups/{group_id}/join")
+
+    async def group_decline(self, group_id: str) -> dict[str, Any]:
+        return await self._request("POST", f"/api/v1/groups/{group_id}/decline")
+
+    async def group_leave(self, group_id: str) -> dict[str, Any]:
+        return await self._request("POST", f"/api/v1/groups/{group_id}/leave")
+
+    async def group_remove(self, group_id: str, name: str) -> dict[str, Any]:
+        return await self._request(
+            "POST", f"/api/v1/groups/{group_id}/remove", json={"name": name}
+        )
+
+    async def group_send(
+        self, group_id: str, content: str, reply_to: Optional[str] = None
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"content": content}
+        if reply_to:
+            body["reply_to"] = reply_to
+        return await self._request(
+            "POST", f"/api/v1/groups/{group_id}/messages", json=body
+        )
 
     # Legacy DM aliases (kept for backwards compatibility with tests)
     async def dm_send(
