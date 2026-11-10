@@ -85,19 +85,32 @@ def test_owner_confirms_then_one_create(clean_store) -> None:  # noqa: F811
             # 发起方（AI）知道 ticket，但没登录拿不到 nonce，直接 POST 不算数
             forged = await http.post("/auth/confirm-create", json={"ticket": ticket, "approve": True})
             assert forged.status_code == 403
+            assert forged.json()["error"] == "no_nonce"
+            assert "verification parameter" in forged.json()["message"]
             page = await _owner_signs_in(http, ticket)
             assert page.status_code == 200 and "beta-bot" in page.text
+            assert "Account: ac***@example.com" in page.text
+            assert "Quota: 1/10" in page.text
+            assert 'id="y"' in page.text
             ok = await http.post(
                 "/auth/confirm-create",
                 json={"ticket": ticket, "nonce": _nonce(page.text), "approve": True},
             )
             assert ok.status_code == 200 and ok.json()["success"] is True
-            # 链接只能用一次
+            assert ok.json()["title"] == "Approved"
+            assert ok.json()["account"] == "Account: ac***@example.com"
+            assert ok.json()["quota"] == "Quota: 1/10"
+            # 链接只能用一次 → 已使用，不是「过期」
             again = await http.post(
                 "/auth/confirm-create",
                 json={"ticket": ticket, "nonce": _nonce(page.text), "approve": True},
             )
-            assert again.status_code == 403
+            assert again.status_code == 410
+            assert again.json()["error"] == "used"
+            used_page = await http.get(f"/auth/confirm-create?t={ticket}")
+            assert used_page.status_code == 410
+            assert "already been used" in used_page.text
+            assert "expired" not in used_page.text.lower()
         assert store.get_access_token(access).create_grants == 1
         created = await _ask_create(mcp, client_id, access)
         assert created["success"] is True and created["agent_name"] == "beta-bot"
@@ -152,14 +165,170 @@ def test_expired_ticket(clean_store) -> None:  # noqa: F811
         async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as http:
             page = await http.get("/auth/confirm-create?t=nope")
             assert page.status_code == 400
+            assert "has expired" in page.text
+            assert "already been used" not in page.text
+            assert "verification parameter" not in page.text
+            cn = await http.get(
+                "/auth/confirm-create?t=nope",
+                headers={"host": "mcp.clawdchat.cn"},
+            )
+            assert cn.status_code == 400
+            assert "已过期" in cn.text
+            assert "已经用过" not in cn.text
+            assert "缺少校验参数" not in cn.text
+
+    _run_flow(backend, {"agent_id": "agent-a"}, calls)
+
+
+def test_ttl_expired_ticket_is_expired_not_used(clean_store) -> None:  # noqa: F811
+    from clawdchat_mcp.storage import CREATE_TICKET_TTL
+
+    store.store_create_ticket(
+        "old",
+        {"access_token": "tok", "name": "x", "created_at": time.time() - CREATE_TICKET_TTL - 1},
+    )
+    assert store.get_create_ticket("old") is None
+
+
+def test_confirm_errors_cn_en_distinct(clean_store) -> None:  # noqa: F811
+    backend = _backend(["user-1", "user-1"])
+
+    async def calls(mcp, client_id, access, consent):
+        res = await _ask_create(mcp, client_id, access)
+        ticket = _ticket(res["confirm_url"])
+        transport = httpx.ASGITransport(app=mcp.streamable_http_app())
+        headers = {"host": "mcp.clawdchat.cn"}
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as http:
+            forged = await http.post(
+                "/auth/confirm-create",
+                json={"ticket": ticket, "approve": True},
+                headers=headers,
+            )
+            assert forged.status_code == 403 and forged.json()["error"] == "no_nonce"
+            assert "缺少校验参数" in forged.json()["message"]
+            page = await http.get(
+                "/auth/confirm-create/callback",
+                params={"code": "c2", "state": ticket},
+                headers=headers,
+            )
+            assert page.status_code == 200
+            assert "账号：ac***@example.com" in page.text
+            assert "名额：1/10" in page.text
+            ok = await http.post(
+                "/auth/confirm-create",
+                json={"ticket": ticket, "nonce": _nonce(page.text), "approve": True},
+                headers=headers,
+            )
+            assert ok.status_code == 200
+            used = await http.post(
+                "/auth/confirm-create",
+                json={"ticket": ticket, "nonce": _nonce(page.text), "approve": True},
+                headers=headers,
+            )
+            assert used.status_code == 410 and used.json()["error"] == "used"
+            assert "已经用过" in used.json()["message"]
+
+    _run_flow(backend, {"agent_id": "agent-a"}, calls)
+
+
+def test_confirm_hides_approve_when_quota_full(clean_store) -> None:  # noqa: F811
+    backend = _backend(["user-1", "user-1"])
+    backend.max_agents = 1
+
+    async def calls(mcp, client_id, access, consent):
+        res = await _ask_create(mcp, client_id, access)
+        ticket = _ticket(res["confirm_url"])
+        transport = httpx.ASGITransport(app=mcp.streamable_http_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as http:
+            page = await _owner_signs_in(http, ticket)
+            assert page.status_code == 200
+            assert "Quota: 1/1" in page.text
+            assert "Account: ac***@example.com" in page.text
+            assert 'id="y"' not in page.text
+            assert 'id="n"' in page.text
+            assert "limit is full" in page.text
+            blocked = await http.post(
+                "/auth/confirm-create",
+                json={"ticket": ticket, "nonce": _nonce(page.text), "approve": True},
+            )
+            assert blocked.status_code == 409
+            assert blocked.json()["error"] == "full"
+            assert store.get_create_ticket(ticket) is not None
+            assert store.get_create_ticket(ticket).get("used") is not True
+        assert store.get_access_token(access).create_grants == 0
+
+    _run_flow(backend, {"agent_id": "agent-a"}, calls)
+    assert backend.created == []
+
+
+def test_confirm_omits_account_quota_when_main_site_silent(clean_store) -> None:  # noqa: F811
+    backend = _backend(["user-1", "user-1"])
+    backend.include_quota = False
+    backend.user_email = None
+
+    async def calls(mcp, client_id, access, consent):
+        res = await _ask_create(mcp, client_id, access)
+        ticket = _ticket(res["confirm_url"])
+        transport = httpx.ASGITransport(app=mcp.streamable_http_app())
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as http:
+            page = await _owner_signs_in(http, ticket)
+            assert "Account:" not in page.text
+            assert "Quota:" not in page.text
+            assert 'id="y"' in page.text
 
     _run_flow(backend, {"agent_id": "agent-a"}, calls)
 
 
 def test_consent_page_hides_create_when_full(clean_store) -> None:  # noqa: F811
-    from clawdchat_mcp.auth_provider import _quota_view
+    from clawdchat_mcp.auth_provider import mask_account, render_select_agent_html, _quota_view
 
     assert _quota_view({"claimed_count": 2, "max_agents": 2}, True)[0] is False
     assert "名额已满（2/2）" in _quota_view({"claimed_count": 2, "max_agents": 2}, True)[1]
     assert _quota_view({"claimed_count": 1, "max_agents": 2}, True) == (True, "")
     assert _quota_view({}, False) == (True, "")
+    assert mask_account("acctest@example.com") == "ac***@example.com"
+    assert mask_account("a@x.com") == "a***@x.com"
+    assert mask_account("not-an-email") == ""
+
+    full_cn = render_select_agent_html(
+        state="s",
+        agents=[{
+            "id": "1",
+            "name": "e2e78-zero",
+            "display_name": "零号e2e",
+            "post_count": 0,
+            "follower_count": 0,
+            "karma": 0,
+        }],
+        is_cn=True,
+        account_mode=True,
+        can_create=False,
+        quota_note="名额已满（2/2），只能选已有的 Agent。",
+    )
+    assert "零号e2e" in full_cn
+    assert "@e2e78-zero" in full_cn
+    assert "或新建一个" not in full_cn
+    assert 'id="createNewBtn"' not in full_cn
+    assert "cancelBtn" in full_cn and "取消" in full_cn
+
+    full_en = render_select_agent_html(
+        state="s",
+        agents=[{"id": "1", "name": "alpha", "post_count": 0, "follower_count": 0, "karma": 0}],
+        is_cn=False,
+        account_mode=True,
+        can_create=False,
+        quota_note="Your limit is full (2/2); pick an existing Agent.",
+    )
+    assert "or create a new one" not in full_en
+    assert 'id="createNewBtn"' not in full_en
+    assert "Cancel" in full_en
+
+    open_cn = render_select_agent_html(
+        state="s",
+        agents=[{"id": "1", "name": "alpha", "post_count": 0, "follower_count": 0, "karma": 0}],
+        is_cn=True,
+        account_mode=True,
+        can_create=True,
+    )
+    assert "或新建一个" in open_cn
+    assert "createNewBtn" in open_cn

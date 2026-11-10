@@ -380,7 +380,13 @@ class TokenStore:
         return data
 
     def consume_create_ticket(self, ticket: str) -> Optional[dict]:
-        return self.create_tickets.pop(ticket, None)
+        """Mark a ticket used so a later GET can say "already used" instead of "expired"."""
+        data = self.get_create_ticket(ticket)
+        if not data or data.get("used"):
+            return None
+        data["used"] = True
+        data["used_at"] = time.time()
+        return dict(data)
 
     # ---- Pending Logins (in-memory, short-lived) ----
 
