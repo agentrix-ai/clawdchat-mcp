@@ -700,18 +700,87 @@ async def select_agent_page_handler(request: Request) -> HTMLResponse:
     return HTMLResponse(html)
 
 
+def quota_is_full(agents_result: dict | None) -> bool:
+    """True only when GET /users/me/agents reports claimed_count >= max_agents.
+
+    Missing or non-int fields are not treated as full — do not invent a limit.
+    """
+    if not isinstance(agents_result, dict):
+        return False
+    used = agents_result.get("claimed_count")
+    limit = agents_result.get("max_agents")
+    return isinstance(used, int) and isinstance(limit, int) and used >= limit
+
+
+def quota_snapshot(agents_result: dict | None) -> dict[str, int]:
+    """claimed / max / total from GET /users/me/agents. Omit fields the backend did not return."""
+    out: dict[str, int] = {}
+    if not isinstance(agents_result, dict):
+        return out
+    claimed = agents_result.get("claimed_count")
+    limit = agents_result.get("max_agents")
+    total = agents_result.get("total")
+    agents = agents_result.get("agents")
+    if isinstance(claimed, int):
+        out["claimed"] = claimed
+    if isinstance(limit, int):
+        out["max"] = limit
+    if isinstance(total, int):
+        out["total"] = total
+    elif isinstance(claimed, int):
+        out["total"] = claimed
+    elif isinstance(agents, list):
+        out["total"] = len(agents)
+    return out
+
+
+def claim_limit_payload(
+    agents_result: dict | None = None,
+    *,
+    existing_agents: list | None = None,
+) -> dict:
+    """MCP payload when create is refused because the account quota is full."""
+    snap = quota_snapshot(agents_result)
+    claimed, limit = snap.get("claimed"), snap.get("max")
+    if claimed is not None and limit is not None:
+        message = (
+            f"Agent quota is full ({claimed}/{limit}). You cannot create another Agent."
+        )
+    else:
+        message = "Agent quota is full. You cannot create another Agent."
+    agents = existing_agents
+    if agents is None and isinstance(agents_result, dict):
+        agents = [
+            {"id": a.get("id"), "name": a.get("name")}
+            for a in (agents_result.get("agents") or [])
+            if isinstance(a, dict)
+        ]
+    payload: dict = {
+        "success": False,
+        "reason": "claim_limit_reached",
+        "message": message,
+        "next_step": (
+            "Bind an existing agent with switch_agent(agent_id='<id>'). "
+            "Call list_my_agents(action='list') to see all owned agents."
+        ),
+        "existing_agents": agents or [],
+    }
+    payload.update(snap)
+    return payload
+
+
 def _quota_view(agents_result: dict, is_cn: bool) -> tuple[bool, str]:
     """Hide "create" when the owner's limit is full (backend reports claimed_count / max_agents)."""
-    used = agents_result.get("claimed_count") if isinstance(agents_result, dict) else None
-    limit = agents_result.get("max_agents") if isinstance(agents_result, dict) else None
-    if isinstance(used, int) and isinstance(limit, int) and used >= limit:
-        note = (
-            f"名额已满（{used}/{limit}），只能选已有的 Agent。"
-            if is_cn
-            else f"Your limit is full ({used}/{limit}); pick an existing Agent."
-        )
-        return False, note
-    return True, ""
+    if not quota_is_full(agents_result):
+        return True, ""
+    used = agents_result["claimed_count"]
+    limit = agents_result["max_agents"]
+    note = (
+        f"名额已满（{used}/{limit}），只能选已有的 Agent。"
+        if is_cn
+        else f"Your limit is full ({used}/{limit}); pick an existing Agent."
+    )
+    return False, note
 
 
 async def select_agent_callback_handler(request: Request) -> JSONResponse:

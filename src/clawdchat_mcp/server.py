@@ -32,6 +32,7 @@ from .auth_confirm import (
 )
 from .auth_provider import (
     ClawdChatOAuthProvider,
+    claim_limit_payload,
     clawdchat_callback_handler,
     confirm_create_callback_handler,
     confirm_create_page_handler,
@@ -39,6 +40,8 @@ from .auth_provider import (
     login_page_handler,
     new_create_ticket,
     login_submit_handler,
+    quota_is_full,
+    quota_snapshot,
     select_agent_callback_handler,
     select_agent_page_handler,
 )
@@ -267,6 +270,15 @@ NO_AGENT_BOUND_MESSAGE = (
     "confirmation link."
 )
 
+LIST_CURRENT_HINT = (
+    "This is only the currently bound agent, not the full account. "
+    "Use action=list to see all owned agents."
+)
+
+LIST_API_KEY_HINT = (
+    "This session is bound to a single Agent API Key, so only that agent is listed."
+)
+
 
 async def _account_jwt(access_token_obj: Any, token_data: Any) -> str:
     """User JWT for account-level calls, renewed (and stored) when close to expiry."""
@@ -363,6 +375,20 @@ def _format_result(data: Any) -> str:
     if isinstance(data, dict):
         return json.dumps(data, ensure_ascii=False, indent=2)
     return str(data)
+
+
+def _apply_quota_snapshot(payload: dict, agents_result: dict) -> dict:
+    """Copy claimed/max/total onto payload without inventing missing backend fields."""
+    for key, value in quota_snapshot(agents_result).items():
+        payload.setdefault(key, value)
+    return payload
+
+
+async def _fetch_my_agents(jwt: str) -> dict:
+    """GET /users/me/agents (auto_create=false). Raises ClawdChatAPIError on failure."""
+    return await ClawdChatUserClient(
+        settings.clawdchat_api_url, jwt
+    ).get_my_agents(auto_create=False)
 
 
 GROUP_RULES_NOTE = (
@@ -1647,7 +1673,10 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         name="list_my_agents",
         title=LIST_MY_AGENTS_TITLE,
         description=(
-            "Return the current agent or list owned agents.\n"
+            "Return the currently bound agent (default) or list owned agents.\n"
+            "action=current is only the bound agent, not the full account; when the "
+            "account API is available it also includes total/claimed/max. "
+            "Use action=list to see every owned agent.\n"
             "Parameters:\n"
             "- action: current (default) or list"
         ),
@@ -1677,29 +1706,85 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                     return "Error: sign-in is required to obtain user credentials"
                 return "Error: not signed in"
 
+            account_jwt = ""
+            current_id = ""
+            if use_stdio:
+                account_jwt = stdio_auth.jwt
+                current_id = stdio_auth.agent_id
+            elif token_data:
+                current_id = token_data.agent_id or ""
+                if token_data.user_jwt:
+                    account_jwt = await _account_jwt(access_token_obj, token_data)
+
+            agents_result: dict | None = None
+            if account_jwt:
+                try:
+                    agents_result = await _fetch_my_agents(account_jwt)
+                except ClawdChatAPIError as e:
+                    if action == "list" and not use_stdio:
+                        return f"Error: {e.detail}"
+                    agents_result = None
+
             if action == "current":
                 if use_stdio:
                     if stdio_auth.is_authenticated:
-                        return _format_result({
+                        payload = {
                             "current_agent_id": stdio_auth.agent_id,
                             "current_agent_name": stdio_auth.agent_name,
-                        })
-                    return _format_result({"message": "Signed in but no agent is selected"})
+                            "hint": LIST_CURRENT_HINT,
+                        }
+                        if agents_result is not None:
+                            _apply_quota_snapshot(payload, agents_result)
+                        return _format_result(payload)
+                    payload = {"message": "Signed in but no agent is selected", "hint": LIST_CURRENT_HINT}
+                    if agents_result is not None:
+                        _apply_quota_snapshot(payload, agents_result)
+                    return _format_result(payload)
                 if not token_data.agent_id:
-                    return _format_result({"bound": False, "message": NO_AGENT_BOUND_MESSAGE})
-                return _format_result({
+                    payload = {
+                        "bound": False,
+                        "message": NO_AGENT_BOUND_MESSAGE,
+                        "hint": LIST_CURRENT_HINT,
+                    }
+                    if agents_result is not None:
+                        _apply_quota_snapshot(payload, agents_result)
+                    return _format_result(payload)
+                payload = {
                     "current_agent_id": token_data.agent_id,
                     "current_agent_name": token_data.agent_name,
-                })
+                    "hint": LIST_CURRENT_HINT,
+                }
+                if agents_result is not None:
+                    _apply_quota_snapshot(payload, agents_result)
+                return _format_result(payload)
 
             if action == "list":
+                if agents_result is not None:
+                    result = dict(agents_result)
+                    agents = result.get("agents") or []
+                    for a in agents:
+                        if isinstance(a, dict):
+                            a["is_current"] = a.get("id") == current_id
+                    _apply_quota_snapshot(result, agents_result)
+                    if not agents:
+                        result["hint"] = (
+                            "No agents yet. Create one with "
+                            "switch_agent(action='create', name='<handle>')."
+                        )
+                    return _format_result(result)
+
                 if use_stdio:
                     if stdio_auth.agents:
                         return _format_result({
                             "agents": [
-                                {"id": a["id"], "name": a.get("name", "")}
+                                {
+                                    "id": a["id"],
+                                    "name": a.get("name", ""),
+                                    "is_current": a.get("id") == current_id,
+                                }
                                 for a in stdio_auth.agents
-                            ]
+                            ],
+                            "total": len(stdio_auth.agents),
                         })
                     return "Error: agent list is empty; complete sign-in again"
 
@@ -1711,26 +1796,10 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                             "is_current": True,
                         }],
                         "total": 1,
+                        "hint": LIST_API_KEY_HINT,
                     })
 
-                user_client = ClawdChatUserClient(
-                    settings.clawdchat_api_url,
-                    await _account_jwt(access_token_obj, token_data),
-                )
-                try:
-                    result = await user_client.get_my_agents(auto_create=False)
-                    agents = result.get("agents") or []
-                    for a in agents:
-                        if isinstance(a, dict):
-                            a["is_current"] = a.get("id") == token_data.agent_id
-                    if not agents:
-                        result["hint"] = (
-                            "No agents yet. Create one with "
-                            "switch_agent(action='create', name='<handle>')."
-                        )
-                    return _format_result(result)
-                except ClawdChatAPIError as e:
-                    return f"Error: {e.detail}"
+                return "Error: agent list is empty; complete sign-in again"
 
             return f"Error: unknown action '{action}'"
         except Exception as e:
@@ -1752,7 +1821,9 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "- display_name: optional display name for create (Unicode and emoji allowed)\n"
             "- description: optional bio for create\n"
             "create needs a session signed in with a ClawdChat account and is subject "
-            "to the account's agent limit. It works directly only if your owner chose "
+            "to the account's agent limit. If claimed already equals max, it returns "
+            "claim_limit_reached (claimed/max) and does not issue a confirmation link; "
+            "bind an existing agent instead. It works directly only if your owner chose "
             "'create a new Agent' on the authorization page (once); otherwise it returns "
             "confirm_url — send it to your owner unchanged and call create again after they "
             "approve. Never create an agent your owner did not ask for; switching to one of "
@@ -1799,6 +1870,17 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                     )
                 if not name:
                     return "Error: name is required for action=create"
+                user_client = ClawdChatUserClient(
+                    settings.clawdchat_api_url,
+                    await _account_jwt(access_token_obj, token_data),
+                )
+                try:
+                    agents_result = await user_client.get_my_agents(auto_create=False)
+                except ClawdChatAPIError as e:
+                    return f"Error: {e.detail}"
+                # 满额时直接拒绝：不签发 confirm_url，主人点同意也建不成
+                if quota_is_full(agents_result):
+                    return _format_result(claim_limit_payload(agents_result))
                 if (token_data.create_grants or 0) <= 0:
                     # 主人没在授权页上选「新建」：AI 不能自己建，只能请主人确认（2026-11-10 主人拍板）
                     ticket = new_create_ticket(access_token_obj.token, name.strip())
@@ -1814,10 +1896,6 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                             "switch_agent(agent_id='<id>') — no confirmation needed."
                         ),
                     })
-                user_client = ClawdChatUserClient(
-                    settings.clawdchat_api_url,
-                    await _account_jwt(access_token_obj, token_data),
-                )
                 try:
                     created = await user_client.create_agent(
                         name.strip(), display_name=display_name, description=description
@@ -1825,13 +1903,10 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                 except ClawdChatAPIError as e:
                     payload = e.payload if isinstance(e.payload, dict) else {}
                     if payload.get("reason") == "claim_limit_reached":
-                        return _format_result({
-                            "success": False,
-                            "reason": "claim_limit_reached",
-                            "message": payload.get("message") or e.detail,
-                            "existing_agents": payload.get("existing_agents", []),
-                            "next_step": "Bind an existing agent with switch_agent(agent_id='<id>').",
-                        })
+                        return _format_result(claim_limit_payload(
+                            agents_result,
+                            existing_agents=payload.get("existing_agents"),
+                        ))
                     return f"Error: {e.detail}"
                 agent = created.get("agent") or {}
                 api_key = created.get("api_key") or ""

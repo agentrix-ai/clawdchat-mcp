@@ -100,6 +100,7 @@ class FakeBackend:
         self.claimed_count: int | None = None
         self.include_quota = True
         self.user_email: str | None = "acctest@example.com"
+        self.fail_get_my_agents = False
 
     async def create_agent(self, name: str, display_name: Any = None, description: Any = None) -> dict[str, Any]:
         from clawdchat_mcp.api_client import ClawdChatAPIError
@@ -111,6 +112,8 @@ class FakeBackend:
                 {
                     "reason": "claim_limit_reached",
                     "message": "limit reached",
+                    "claimed_count": len(self.agents),
+                    "max_agents": self.max_agents,
                     "existing_agents": self.public_agents(),
                 },
             )
@@ -154,7 +157,19 @@ class FakeBackend:
             me["email"] = self.user_email
         return me
 
+    def agents_payload(self) -> dict[str, Any]:
+        agents = self.public_agents()
+        return {
+            "agents": agents,
+            "claimed_count": len(agents),
+            "max_agents": self.max_agents,
+        }
+
     async def get_my_agents(self) -> dict[str, Any]:
+        if self.fail_get_my_agents:
+            from clawdchat_mcp.api_client import ClawdChatAPIError
+
+            raise ClawdChatAPIError(503, "unavailable")
         return self._quota_payload()
 
     async def get_agent_credentials(self, agent_id: str) -> dict[str, Any]:
@@ -1102,6 +1117,93 @@ class TestStdioLoginConfirm:
         assert confirmed.json().get("success") is True
         assert backend.reset_calls == ["agent-a"]
         assert mgr.api_key == "clawdchat_rotated_agent-a"
+
+
+class TestStdioListMyAgents:
+    def test_current_includes_quota_and_list_hint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from clawdchat_mcp.stdio_auth import stdio_auth
+
+        backend = FakeBackend([
+            {"id": "agent-a", "name": "Alpha", "api_key": "clawdchat_a"},
+            {"id": "agent-b", "name": "Beta", "api_key": "clawdchat_b"},
+        ])
+        backend.max_agents = 4
+        stdio_auth.jwt = "jwt-test-user"
+        stdio_auth.api_key = "clawdchat_a"
+        stdio_auth.agent_id = "agent-a"
+        stdio_auth.agent_name = "Alpha"
+        stdio_auth.agents = backend.public_agents()
+        mcp = create_mcp_server(transport="stdio")
+        _stdio_no_oauth(monkeypatch)
+        p_auth, p_server = _patch_user_client(backend)
+        try:
+            with p_auth, p_server:
+                current = _tool_payload(asyncio.run(mcp.call_tool(
+                    "list_my_agents", {"action": "current"}
+                )))
+                listed = _tool_payload(asyncio.run(mcp.call_tool(
+                    "list_my_agents", {"action": "list"}
+                )))
+            assert current["current_agent_id"] == "agent-a"
+            assert current.get("claimed") == 2 and current.get("max") == 4
+            assert current.get("total") == 2
+            assert "action=list" in current.get("hint", "")
+            assert {a["name"] for a in listed["agents"]} == {"Alpha", "Beta"}
+            assert listed.get("claimed") == 2 and listed.get("max") == 4
+            assert listed.get("total") == 2
+            assert "action=list" not in listed.get("hint", "")
+        finally:
+            _clear_stdio_auth()
+
+    def test_list_fallback_does_not_hint_action_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from clawdchat_mcp.stdio_auth import stdio_auth
+
+        backend = FakeBackend([
+            {"id": "agent-a", "name": "Alpha", "api_key": "clawdchat_a"},
+            {"id": "agent-b", "name": "Beta", "api_key": "clawdchat_b"},
+        ])
+        backend.fail_get_my_agents = True
+        stdio_auth.jwt = "jwt-test-user"
+        stdio_auth.api_key = "clawdchat_a"
+        stdio_auth.agent_id = "agent-a"
+        stdio_auth.agent_name = "Alpha"
+        stdio_auth.agents = backend.public_agents()
+        mcp = create_mcp_server(transport="stdio")
+        _stdio_no_oauth(monkeypatch)
+        p_auth, p_server = _patch_user_client(backend)
+        try:
+            with p_auth, p_server:
+                listed = _tool_payload(asyncio.run(mcp.call_tool(
+                    "list_my_agents", {"action": "list"}
+                )))
+            assert {a["name"] for a in listed["agents"]} == {"Alpha", "Beta"}
+            assert listed.get("total") == 2
+            assert "action=list" not in listed.get("hint", "")
+            assert "claimed" not in listed and "max" not in listed
+        finally:
+            _clear_stdio_auth()
+
+    def test_create_still_requires_hosted_account(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from clawdchat_mcp.stdio_auth import stdio_auth
+
+        backend = FakeBackend([{"id": "agent-a", "name": "Alpha", "api_key": "clawdchat_a"}])
+        backend.max_agents = 1
+        stdio_auth.jwt = "jwt-test-user"
+        stdio_auth.api_key = "clawdchat_a"
+        stdio_auth.agent_id = "agent-a"
+        stdio_auth.agent_name = "Alpha"
+        stdio_auth.agents = backend.public_agents()
+        mcp = create_mcp_server(transport="stdio")
+        _stdio_no_oauth(monkeypatch)
+        try:
+            res = _tool_payload(asyncio.run(mcp.call_tool(
+                "switch_agent", {"action": "create", "name": "nope"}
+            )))
+            text = json.dumps(res)
+            assert "confirm_url" not in text
+            assert "account" in text.lower() or "hosted" in text.lower()
+        finally:
+            _clear_stdio_auth()
 
 
 class TestStdioSwitchTool:
