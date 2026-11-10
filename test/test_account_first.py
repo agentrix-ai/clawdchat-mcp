@@ -99,12 +99,13 @@ def _run_flow(backend: FakeBackend, body: dict[str, Any], tool_calls):
 # ---------------------------------------------------------------- consent / unbound session
 
 
-def test_bind_later_issues_unbound_session(clean_store) -> None:
+def test_create_new_issues_unbound_session_with_one_grant(clean_store) -> None:
     backend = FakeBackend([])
 
     async def calls(mcp, client_id, access, consent):
         token = store.get_access_token(access)
         assert token is not None and token.user_jwt and not token.agent_api_key
+        assert token.create_grants == 1  # 主人在授权页上选了「新建」
         with _as(access, client_id):
             with pytest.raises(ValueError) as exc:
                 _get_agent_client()
@@ -116,20 +117,21 @@ def test_bind_later_issues_unbound_session(clean_store) -> None:
             posted = _tool_payload(await mcp.call_tool("create_post", {"title": "t", "content": "c"}))
             assert NO_AGENT_BOUND_MESSAGE.split(".")[0] in json.dumps(posted)
 
-    _run_flow(backend, {"bind_later": True}, calls)
+    _run_flow(backend, {"create_new": True}, calls)
     assert backend.created == [] and backend.reset_calls == []
     assert backend.auto_create_flags and not any(backend.auto_create_flags)
 
 
-def test_bind_later_must_be_true_bool(clean_store) -> None:
-    backend = FakeBackend([])
+def test_create_new_must_be_true_bool_and_bind_later_gone(clean_store) -> None:
+    for body in ({"create_new": "true"}, {"bind_later": True}):
+        backend = FakeBackend([])
 
-    async def calls(mcp, client_id, access, consent):
-        assert access == ""
-        assert consent.status_code == 400
+        async def calls(mcp, client_id, access, consent):
+            assert access == ""
+            assert consent.status_code == 400
 
-    _run_flow(backend, {"bind_later": "true"}, calls)
-    assert store.auth_codes == {}
+        _run_flow(backend, body, calls)
+        assert store.auth_codes == {}
 
 
 # ---------------------------------------------------------------- create
@@ -149,8 +151,15 @@ def test_create_binds_new_agent(clean_store) -> None:
             assert _get_agent_client().api_key == "clawdchat_new_claude-neo"
             listed = _tool_payload(await mcp.call_tool("list_my_agents", {"action": "list"}))
             assert [a["is_current"] for a in listed["agents"]] == [True]
+            assert store.get_access_token(access).create_grants == 0
+            # 一次「新建」用完了：再建要主人确认
+            again = _tool_payload(await mcp.call_tool(
+                "switch_agent", {"action": "create", "name": "claude-two"}
+            ))
+            assert again.get("needs_owner_confirmation") is True
+            assert "/auth/confirm-create?t=" in again["confirm_url"]
 
-    _run_flow(backend, {"bind_later": True}, calls)
+    _run_flow(backend, {"create_new": True}, calls)
     assert backend.created == ["claude-neo"]
 
 
@@ -159,6 +168,7 @@ def test_create_at_limit_keeps_binding_and_lists_existing(clean_store) -> None:
     backend.max_agents = 1
 
     async def calls(mcp, client_id, access, consent):
+        store.change_create_grants(access, +1)  # 主人已确认过新建
         with _as(access, client_id):
             res = _tool_payload(await mcp.call_tool(
                 "switch_agent", {"action": "create", "name": "second"}
@@ -179,7 +189,7 @@ def test_create_requires_name(clean_store) -> None:
             res = _tool_payload(await mcp.call_tool("switch_agent", {"action": "create"}))
             assert "name is required" in json.dumps(res)
 
-    _run_flow(backend, {"bind_later": True}, calls)
+    _run_flow(backend, {"create_new": True}, calls)
 
 
 def test_api_key_session_cannot_create(clean_store) -> None:
@@ -209,7 +219,7 @@ def test_switch_from_unbound_session(clean_store) -> None:
             assert res.get("success") is True
             assert _get_agent_client().api_key == "clawdchat_a"
 
-    _run_flow(backend, {"bind_later": True}, calls)
+    _run_flow(backend, {"create_new": True}, calls)
     assert backend.reset_calls == []
 
 

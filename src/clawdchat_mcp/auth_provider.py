@@ -12,7 +12,10 @@ Authentication flow (account-first, hosted HTTP):
   Pasting an Agent API Key (Channel B) still binds that single Agent only.
 """
 
+import html
+import json
 import logging
+import secrets
 import time
 from pathlib import Path
 from urllib.parse import urlencode
@@ -183,6 +186,7 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
             user_jwt=code_data.user_jwt,
             resource=code_data.resource,
             refresh_token=refresh_token,
+            create_grants=code_data.create_grants,
         ))
 
         # Store refresh token
@@ -195,6 +199,7 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
             agent_id=code_data.agent_id,
             agent_name=code_data.agent_name,
             user_jwt=code_data.user_jwt,
+            create_grants=code_data.create_grants,
         ))
 
         logger.info(
@@ -256,6 +261,7 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
             agent_name=old_data.agent_name,
             user_jwt=user_jwt,
             refresh_token=new_refresh,
+            create_grants=old_data.create_grants,
         ))
 
         self.store.store_refresh_token(RefreshTokenData(
@@ -267,6 +273,7 @@ class ClawdChatOAuthProvider(OAuthAuthorizationServerProvider):
             agent_id=old_data.agent_id,
             agent_name=old_data.agent_name,
             user_jwt=user_jwt,
+            create_grants=old_data.create_grants,
         ))
 
         return OAuthTokenType(
@@ -588,6 +595,8 @@ def render_select_agent_html(
     select_url: str = "/auth/select-agent",
     logo_src: str | None = None,
     account_mode: bool = False,
+    can_create: bool = True,
+    quota_note: str = "",
 ) -> str:
     """Render the shared Agent confirmation page (hosted HTTP and stdio).
 
@@ -602,6 +611,8 @@ def render_select_agent_html(
         select_url=select_url,
         logo_src=logo_src or "/logo.png",
         account_mode=account_mode,
+        can_create=can_create,
+        quota_note=quota_note,
     )
 
 
@@ -679,12 +690,28 @@ async def select_agent_page_handler(request: Request) -> HTMLResponse:
             if a.get("is_active", True) and a.get("is_claimed", True)
         ]
     except Exception:
-        agents = []
+        agents_result, agents = {}, []
 
+    can_create, quota_note = _quota_view(agents_result, is_cn)
     html = render_select_agent_html(
-        state=state, agents=agents, is_cn=is_cn, account_mode=True
+        state=state, agents=agents, is_cn=is_cn, account_mode=True,
+        can_create=can_create, quota_note=quota_note,
     )
     return HTMLResponse(html)
+
+
+def _quota_view(agents_result: dict, is_cn: bool) -> tuple[bool, str]:
+    """Hide "create" when the owner's limit is full (backend reports claimed_count / max_agents)."""
+    used = agents_result.get("claimed_count") if isinstance(agents_result, dict) else None
+    limit = agents_result.get("max_agents") if isinstance(agents_result, dict) else None
+    if isinstance(used, int) and isinstance(limit, int) and used >= limit:
+        note = (
+            f"名额已满（{used}/{limit}），只能选已有的 Agent。"
+            if is_cn
+            else f"Your limit is full ({used}/{limit}); pick an existing Agent."
+        )
+        return False, note
+    return True, ""
 
 
 async def select_agent_callback_handler(request: Request) -> JSONResponse:
@@ -701,7 +728,8 @@ async def select_agent_callback_handler(request: Request) -> JSONResponse:
     state = body.get("state", "")
     agent_id = body.get("agent_id", "")
     agent_name = body.get("agent_name", "")
-    bind_later = body.get("bind_later") is True
+    # 主人在授权页上选「新建」：会话先不绑号，允许 AI 新建一次（2026-11-10 主人拍板，取代「仅授权」）
+    create_new = body.get("create_new") is True
     try:
         confirm_reset = confirm_reset_from_mapping(body)
     except ConfirmResetTypeError:
@@ -710,7 +738,7 @@ async def select_agent_callback_handler(request: Request) -> JSONResponse:
             status_code=422,
         )
 
-    if not state or (not agent_id and not bind_later):
+    if not state or (not agent_id and not create_new):
         return JSONResponse({"error": SelectAgentCopy.error(is_cn, "missing_agent")}, status_code=400)
 
     pending = store.get_pending_login(state)
@@ -718,8 +746,16 @@ async def select_agent_callback_handler(request: Request) -> JSONResponse:
         return JSONResponse({"error": SelectAgentCopy.error(is_cn, "session_expired")}, status_code=400)
 
     if not agent_id:
-        # Account-level consent only: no Agent bound yet (switch_agent can bind / create later)
-        return _issue_auth_code(state, pending, api_key="", agent_id="", agent_name="")
+        try:
+            user_client = ClawdChatUserClient(settings.clawdchat_api_url, pending.user_jwt)
+            can_create, note = _quota_view(await user_client.get_my_agents(auto_create=False), is_cn)
+        except Exception:
+            can_create, note = True, ""
+        if not can_create:
+            return JSONResponse({"error": note}, status_code=409)
+        return _issue_auth_code(
+            state, pending, api_key="", agent_id="", agent_name="", create_grants=1
+        )
 
     return await _complete_authorization(
         state, pending, agent_id, agent_name,
@@ -785,7 +821,13 @@ async def _complete_authorization(
 
 
 def _issue_auth_code(
-    state: str, pending: PendingLogin, *, api_key: str, agent_id: str, agent_name: str
+    state: str,
+    pending: PendingLogin,
+    *,
+    api_key: str,
+    agent_id: str,
+    agent_name: str,
+    create_grants: int = 0,
 ) -> JSONResponse:
     """Issue the OAuth code for a consented account session (Agent optional)."""
     code = store.generate_code()
@@ -802,6 +844,7 @@ def _issue_auth_code(
         agent_name=agent_name,
         user_jwt=pending.user_jwt,
         resource=pending.resource,
+        create_grants=create_grants,
     ))
 
     # Consume pending login
@@ -816,3 +859,171 @@ def _issue_auth_code(
     )
 
     return JSONResponse({"redirect": redirect_uri})
+
+
+# ---------------------------------------------------------------- confirm creating an Agent
+# 对话里 AI 想再新建 Agent、但主人没在授权页上选「新建」时：AI 只能拿到一个确认链接。
+# 主人打开链接 → 用虾聊账号登录（必须和这条 MCP 连接是同一个账号）→ 点「同意新建」，
+# 这条连接才多一次新建额度。AI 自己完成不了登录，所以绕不过主人。
+
+_CONFIRM_TEXT = {
+    True: {
+        "title": "确认让 AI 为你新建一个虾聊 Agent？",
+        "intro": "你在用的 AI 想为你新建一个 Agent。先登录虾聊确认是你本人。",
+        "login": "登录并继续",
+        "ask": "允许这个 AI 为你新建一个 Agent？",
+        "name": "它想用的名字：",
+        "approve": "同意新建",
+        "deny": "不用了",
+        "done": "已同意。回到对话里，AI 会继续新建。",
+        "denied": "已拒绝，不会新建。",
+        "expired": "确认链接无效或已过期，请让 AI 重新发一个。",
+        "mismatch": "登录的账号和这个 AI 连接的虾聊账号不是同一个，无法确认。",
+        "failed": "登录失败，请重试。",
+    },
+    False: {
+        "title": "Let the AI create a ClawdChat Agent for you?",
+        "intro": "The AI you're using wants to create a new Agent. Sign in to ClawdChat first to confirm it's you.",
+        "login": "Sign in and continue",
+        "ask": "Allow this AI to create a new Agent for you?",
+        "name": "Name it wants to use: ",
+        "approve": "Allow",
+        "deny": "No thanks",
+        "done": "Approved. Go back to the conversation; the AI will continue.",
+        "denied": "Declined. Nothing will be created.",
+        "expired": "This link is invalid or expired. Ask the AI for a new one.",
+        "mismatch": "That account is not the ClawdChat account this AI is connected with.",
+        "failed": "Sign-in failed, please retry.",
+    },
+}
+
+
+def _confirm_page(is_cn: bool, inner: str) -> HTMLResponse:
+    t = _CONFIRM_TEXT[is_cn]
+    return HTMLResponse(
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta name="robots" content="noindex">'
+        f"<title>{html.escape(t['title'])}</title>"
+        "<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;"
+        "background:#f0f2f5;display:flex;justify-content:center;padding-top:72px}"
+        ".c{background:#fff;max-width:440px;width:92vw;padding:32px;border-radius:12px;"
+        "border:1px solid #e5e7eb}h1{font-size:20px;color:#111827}p{color:#4b5563;font-size:14px;"
+        "line-height:1.6}.b{display:block;width:100%;padding:12px;border:none;border-radius:8px;"
+        "font-size:14px;font-weight:600;margin-top:12px;cursor:pointer;text-align:center;"
+        "text-decoration:none}.p{background:#6366f1;color:#fff}.g{background:#fff;color:#6b7280;"
+        "border:1px solid #e5e7eb}</style></head><body><div class=\"c\">"
+        + inner
+        + "</div></body></html>"
+    )
+
+
+def _confirm_message(is_cn: bool, key: str, status: int = 200) -> HTMLResponse:
+    t = _CONFIRM_TEXT[is_cn]
+    resp = _confirm_page(is_cn, f"<h1>{html.escape(t['title'])}</h1><p>{html.escape(t[key])}</p>")
+    resp.status_code = status
+    return resp
+
+
+def new_create_ticket(access_token: str, name: str = "") -> str:
+    ticket = secrets.token_urlsafe(24)
+    store.store_create_ticket(ticket, {"access_token": access_token, "name": name or ""})
+    return ticket
+
+
+async def confirm_create_page_handler(request: Request) -> Response:
+    """GET /auth/confirm-create?t=TICKET — explain, then send the owner to sign in."""
+    is_cn = is_cn_site(request)
+    ticket = request.query_params.get("t", "")
+    data = store.get_create_ticket(ticket)
+    if not data:
+        return _confirm_message(is_cn, "expired", 400)
+    t = _CONFIRM_TEXT[is_cn]
+    params = urlencode(
+        {"callback_url": f"{settings.mcp_server_url}/auth/confirm-create/callback", "state": ticket}
+    )
+    login_url = f"{settings.clawdchat_api_url}/api/v1/auth/external/authorize?{params}"
+    return _confirm_page(
+        is_cn,
+        f"<h1>{html.escape(t['title'])}</h1><p>{html.escape(t['intro'])}</p>"
+        f'<a class="b p" href="{html.escape(login_url)}">{html.escape(t["login"])}</a>',
+    )
+
+
+async def confirm_create_callback_handler(request: Request) -> Response:
+    """GET /auth/confirm-create/callback — must be the same ClawdChat account as the session."""
+    from .user_jwt import jwt_subject
+
+    is_cn = is_cn_site(request)
+    ticket = request.query_params.get("state", "")
+    code = request.query_params.get("code", "")
+    data = store.get_create_ticket(ticket)
+    if not data or not code:
+        return _confirm_message(is_cn, "expired", 400)
+    session = store.get_access_token(data["access_token"])
+    if not session or not session.user_jwt:
+        return _confirm_message(is_cn, "expired", 400)
+    try:
+        result = await ClawdChatUserClient(settings.clawdchat_api_url, "").exchange_external_code(code)
+    except Exception:
+        return _confirm_message(is_cn, "failed", 400)
+    signed_in = jwt_subject(result.get("jwt") or "")
+    if not signed_in or signed_in != jwt_subject(session.user_jwt):
+        return _confirm_message(is_cn, "mismatch", 403)
+
+    data["verified"] = True
+    data["nonce"] = secrets.token_urlsafe(24)
+    t = _CONFIRM_TEXT[is_cn]
+    name_html = (
+        f"<p>{html.escape(t['name'])}<strong>{html.escape(data['name'])}</strong></p>"
+        if data.get("name")
+        else ""
+    )
+    payload = html.escape(json.dumps({"ticket": ticket, "nonce": data["nonce"]}))
+    script = (
+        "<script>(function(){var p=document.getElementById('p');"
+        "async function go(ok){var b=JSON.parse(p.dataset.body);b.approve=ok;"
+        "var r=await fetch('/auth/confirm-create',{method:'POST',"
+        "headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});"
+        "var d=await r.json().catch(function(){return {}});"
+        "document.getElementById('m').textContent=d.message||'';"
+        "document.getElementById('a').style.display='none';}"
+        "document.getElementById('y').onclick=function(){go(true)};"
+        "document.getElementById('n').onclick=function(){go(false)};})();</script>"
+    )
+    return _confirm_page(
+        is_cn,
+        f"<h1>{html.escape(t['ask'])}</h1>{name_html}"
+        f'<div id="a"><button class="b p" id="y">{html.escape(t["approve"])}</button>'
+        f'<button class="b g" id="n">{html.escape(t["deny"])}</button></div>'
+        f'<p id="m"></p><div id="p" data-body="{payload}"></div>{script}',
+    )
+
+
+async def confirm_create_submit_handler(request: Request) -> JSONResponse:
+    """POST /auth/confirm-create — owner's decision; needs the nonce shown after sign-in."""
+    is_cn = is_cn_site(request)
+    t = _CONFIRM_TEXT[is_cn]
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse({"message": t["expired"]}, status_code=400)
+    ticket = str(body.get("ticket") or "")
+    nonce = str(body.get("nonce") or "")
+    data = store.get_create_ticket(ticket)
+    if (
+        not data
+        or not data.get("verified")
+        or not nonce
+        or not secrets.compare_digest(str(data.get("nonce") or ""), nonce)
+    ):
+        return JSONResponse({"message": t["expired"]}, status_code=403)
+    store.consume_create_ticket(ticket)
+    if body.get("approve") is not True:
+        return JSONResponse({"success": False, "message": t["denied"]})
+    if not store.change_create_grants(data["access_token"], +1):
+        return JSONResponse({"message": t["expired"]}, status_code=400)
+    logger.info("Owner approved creating an agent for an MCP session")
+    return JSONResponse({"success": True, "message": t["done"]})

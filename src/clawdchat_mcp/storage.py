@@ -92,6 +92,8 @@ class AuthCodeData:
     agent_name: str
     user_jwt: str
     resource: Optional[str] = None
+    # 主人在授权页上选了「新建」：允许 switch_agent(create) 的次数（用一次扣一次）
+    create_grants: int = 0
 
 
 @dataclass
@@ -109,6 +111,7 @@ class AccessTokenData:
     resource: Optional[str] = None
     # Refresh token issued together with this access token (keeps bindings in sync)
     refresh_token: Optional[str] = None
+    create_grants: int = 0
 
 
 @dataclass
@@ -123,6 +126,7 @@ class RefreshTokenData:
     agent_id: str
     agent_name: str
     user_jwt: str
+    create_grants: int = 0
 
 
 @dataclass
@@ -161,6 +165,9 @@ class PendingLogin:
             self.created_at = time.time()
 
 
+CREATE_TICKET_TTL = 15 * 60
+
+
 class TokenStore:
     """Storage for all OAuth-related data.
 
@@ -174,6 +181,7 @@ class TokenStore:
         self.refresh_tokens: dict[str, RefreshTokenData] = {}
         self.clients: dict[str, OAuthClientData] = {}
         self.pending_logins: dict[str, PendingLogin] = {}  # keyed by state
+        self.create_tickets: dict[str, dict] = {}  # keyed by ticket
         self._fernet = _load_fernet()
         self._load_clients()
         self._load_tokens()
@@ -343,6 +351,36 @@ class TokenStore:
             )
         except Exception as e:
             logger.warning(f"Failed to load tokens: {e}")
+
+    # ---- Create grants (owner approved creating an Agent) ----
+
+    def change_create_grants(self, token: str, delta: int) -> bool:
+        """Add / use a create grant on an access token and its refresh token."""
+        data = self.access_tokens.get(token)
+        if not data:
+            return False
+        data.create_grants = max(0, (data.create_grants or 0) + delta)
+        rt = self.refresh_tokens.get(data.refresh_token or "")
+        if rt is not None:
+            rt.create_grants = data.create_grants
+        self._save_tokens()
+        return True
+
+    # ---- Create confirmations (in-memory, short-lived) ----
+
+    def store_create_ticket(self, ticket: str, data: dict) -> None:
+        data.setdefault("created_at", time.time())
+        self.create_tickets[ticket] = data
+
+    def get_create_ticket(self, ticket: str) -> Optional[dict]:
+        data = self.create_tickets.get(ticket)
+        if data and (time.time() - data["created_at"]) > CREATE_TICKET_TTL:
+            del self.create_tickets[ticket]
+            return None
+        return data
+
+    def consume_create_ticket(self, ticket: str) -> Optional[dict]:
+        return self.create_tickets.pop(ticket, None)
 
     # ---- Pending Logins (in-memory, short-lived) ----
 

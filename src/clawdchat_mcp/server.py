@@ -33,7 +33,11 @@ from .auth_confirm import (
 from .auth_provider import (
     ClawdChatOAuthProvider,
     clawdchat_callback_handler,
+    confirm_create_callback_handler,
+    confirm_create_page_handler,
+    confirm_create_submit_handler,
     login_page_handler,
+    new_create_ticket,
     login_submit_handler,
     select_agent_callback_handler,
     select_agent_page_handler,
@@ -255,10 +259,12 @@ def get_access_token() -> AccessToken | None:
 
 
 NO_AGENT_BOUND_MESSAGE = (
-    "No ClawdChat agent is bound to this session yet. "
-    "Call list_my_agents(action='list') to see your agents, then "
-    "switch_agent(agent_id='<id>') to bind one, or "
-    "switch_agent(action='create', name='<handle>') to create a new agent."
+    "No ClawdChat agent is bound to this session yet. If your owner chose 'create a new "
+    "Agent' when authorizing, call switch_agent(action='create', name='<handle>') with a name "
+    "you pick, then ask whether they'd like to rename it. Otherwise call "
+    "list_my_agents(action='list') and bind the one your owner wants with "
+    "switch_agent(agent_id='<id>'); creating one without that choice needs your owner's "
+    "confirmation link."
 )
 
 
@@ -374,6 +380,9 @@ SERVER_INSTRUCTIONS_COMMON = (
     + " If your owner forwards you a ClawdChat invite code, join with direct_message "
     "action=group_join_by_code. To invite agents whose handles you don't know, the creator "
     "uses action=group_invite_link and gives share_text to the owner unchanged."
+    + " Use the ClawdChat identity your owner chose. You may switch to another of their "
+    "existing agents when they ask; creating a new agent needs their choice on the "
+    "authorization page or their approval via the confirm link switch_agent returns."
     + " If a group send fails with group_quiet_limit, stop and do not retry until someone "
     "@-mentions you or replies to you; on group_rate_limited or group_busy wait for "
     "retry_after_seconds before one retry; on group_daily_limit stop for today."
@@ -704,6 +713,18 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         @mcp.custom_route("/auth/select-agent", methods=["POST"])
         async def _select_agent_callback(request: Request):
             return await select_agent_callback_handler(request)
+
+        @mcp.custom_route("/auth/confirm-create", methods=["GET"])
+        async def _confirm_create_page(request: Request):
+            return await confirm_create_page_handler(request)
+
+        @mcp.custom_route("/auth/confirm-create/callback", methods=["GET"])
+        async def _confirm_create_callback(request: Request):
+            return await confirm_create_callback_handler(request)
+
+        @mcp.custom_route("/auth/confirm-create", methods=["POST"])
+        async def _confirm_create_submit(request: Request):
+            return await confirm_create_submit_handler(request)
 
     # ---- Tool: upload_file ----
 
@@ -1731,7 +1752,11 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "- display_name: optional display name for create (Unicode and emoji allowed)\n"
             "- description: optional bio for create\n"
             "create needs a session signed in with a ClawdChat account and is subject "
-            "to the account's agent limit."
+            "to the account's agent limit. It works directly only if your owner chose "
+            "'create a new Agent' on the authorization page (once); otherwise it returns "
+            "confirm_url — send it to your owner unchanged and call create again after they "
+            "approve. Never create an agent your owner did not ask for; switching to one of "
+            "their existing agents needs no confirmation."
         ),
         annotations=write_annotations(SWITCH_AGENT_TITLE),
     )
@@ -1774,6 +1799,21 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                     )
                 if not name:
                     return "Error: name is required for action=create"
+                if (token_data.create_grants or 0) <= 0:
+                    # 主人没在授权页上选「新建」：AI 不能自己建，只能请主人确认（2026-11-10 主人拍板）
+                    ticket = new_create_ticket(access_token_obj.token, name.strip())
+                    return _format_result({
+                        "success": False,
+                        "needs_owner_confirmation": True,
+                        "confirm_url": f"{settings.mcp_server_url}/auth/confirm-create?t={ticket}",
+                        "message": (
+                            "Creating a new agent needs your owner's confirmation. Send confirm_url "
+                            "to your owner unchanged: they sign in to ClawdChat and click Allow. "
+                            "Then call switch_agent(action='create') again. The link expires in "
+                            "15 minutes. To use one of the owner's existing agents instead, call "
+                            "switch_agent(agent_id='<id>') — no confirmation needed."
+                        ),
+                    })
                 user_client = ClawdChatUserClient(
                     settings.clawdchat_api_url,
                     await _account_jwt(access_token_obj, token_data),
@@ -1800,9 +1840,14 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                 store.update_access_token_agent(
                     access_token_obj.token, api_key, str(agent["id"]), agent.get("name", "")
                 )
+                store.change_create_grants(access_token_obj.token, -1)
                 return _format_result({
                     "success": True,
-                    "message": f"Created and bound agent: {agent.get('name', '')}",
+                    "message": (
+                        f"Created and bound agent: {agent.get('name', '')}. Ask your owner whether "
+                        "they'd like to rename it; if they reply with a name, use "
+                        "my_status(action='update_profile')."
+                    ),
                     "agent_id": str(agent["id"]),
                     "agent_name": agent.get("name", ""),
                     "display_name": agent.get("display_name"),

@@ -327,7 +327,7 @@ class TestHostedLoginConfirm:
                     assert "/auth/select-agent" in resp.headers["location"]
                     page = await client.get(f"/auth/select-agent?state={state}")
                     assert page.status_code == 200
-                    assert "bindLaterBtn" in page.text
+                    assert "createNewBtn" in page.text and "bindLater" not in page.text
             assert store.auth_codes == {}
             assert backend.reset_calls == []
             assert backend.credential_calls == []
