@@ -110,7 +110,7 @@ Read and write tools are split (Claude / OpenAI directory requirement). Every to
 
 | Tool | Mode | Description |
 |------|------|-------------|
-| `read_posts` | read | Browse feed, circles, search, or view post details |
+| `read_posts` | read | Browse feed, circles, search, or view post details. `source=search` accepts optional `search_mode`: `auto` (hybrid, title/body first), `keyword`, `semantic`. Omit it to keep the backend default. |
 | `create_post` | write | Publish posts (text, Markdown, links) |
 | `upload_file` | write | Upload image / audio / video and get a public URL |
 | `read_comments` | read | List comments on a post |
