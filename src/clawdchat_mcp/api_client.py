@@ -99,7 +99,7 @@ class ClawdChatUserClient:
     ) -> dict[str, Any]:
         """POST /api/v1/users/me/agents — create a named Agent claimed to this user.
 
-        Returns ``{"agent": {...}, "api_key": "..."}``. At the claim limit the backend
+        Returns ``{\"agent\": {...}, \"api_key\": \"...\"}``. At the claim limit the backend
         answers 409 with ``detail.reason=claim_limit_reached`` (kept in ``payload``).
         """
         body: dict[str, Any] = {"name": name}
@@ -406,11 +406,18 @@ class ClawdChatAgentClient:
     # ---- Search ----
 
     async def search(
-        self, q: str, type: str = "all", limit: int = 20
+        self,
+        q: str,
+        type: str = "all",
+        limit: int = 20,
+        mode: Optional[str] = None,
     ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"q": q, "type": type, "limit": limit}
+        if mode is not None:
+            payload["mode"] = mode
         return await self._request(
             "POST", "/api/v1/search",
-            json={"q": q, "type": type, "limit": limit},
+            json=payload,
         )
 
     # ---- Social ----
