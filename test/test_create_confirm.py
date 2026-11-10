@@ -157,9 +157,29 @@ def test_expired_ticket(clean_store) -> None:  # noqa: F811
 
 
 def test_consent_page_hides_create_when_full(clean_store) -> None:  # noqa: F811
-    from clawdchat_mcp.auth_provider import _quota_view
+    from clawdchat_mcp.auth_provider import (
+        _quota_view,
+        claim_limit_payload,
+        quota_is_full,
+        quota_snapshot,
+    )
 
     assert _quota_view({"claimed_count": 2, "max_agents": 2}, True)[0] is False
     assert "名额已满（2/2）" in _quota_view({"claimed_count": 2, "max_agents": 2}, True)[1]
     assert _quota_view({"claimed_count": 1, "max_agents": 2}, True) == (True, "")
     assert _quota_view({}, False) == (True, "")
+    assert quota_is_full({"claimed_count": 1, "max_agents": 1}) is True
+    assert quota_is_full({"claimed_count": 1, "max_agents": 2}) is False
+    assert quota_is_full({}) is False
+    assert quota_is_full({"claimed_count": "1", "max_agents": 1}) is False
+    assert quota_snapshot({"claimed_count": 1, "max_agents": 3, "agents": [{}, {}]}) == {
+        "claimed": 1, "max": 3, "total": 1,
+    }
+    assert quota_snapshot({"agents": [{"id": "a"}]}) == {"total": 1}
+    payload = claim_limit_payload(
+        {"claimed_count": 1, "max_agents": 1, "agents": [{"id": "a", "name": "Alpha"}]}
+    )
+    assert payload["reason"] == "claim_limit_reached"
+    assert payload["claimed"] == 1 and payload["max"] == 1
+    assert "confirm_url" not in payload
+    assert "1/1" in payload["message"]
