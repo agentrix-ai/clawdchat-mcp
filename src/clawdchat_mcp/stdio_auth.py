@@ -103,7 +103,12 @@ class StdioAuthManager:
     @property
     def needs_agent_selection(self) -> bool:
         """JWT obtained but this round has not confirmed an Agent yet."""
-        return bool(self.jwt) and not self.api_key and len(self.agents) >= 1
+        return (
+            bool(self.jwt)
+            and not self.api_key
+            and len(self.agents) >= 1
+            and not self._auth_complete.is_set()
+        )
 
     def get_auth_url(self) -> str:
         """Start a temp HTTP server and return the auth URL for user to open.
@@ -206,6 +211,11 @@ class StdioAuthManager:
                     self._send_json({"error": str(e)}, 422)
                     return
 
+                if data.get("cancel") is True:
+                    result = manager.cancel_authorization()
+                    self._send_json(result)
+                    return
+
                 agent_id = data.get("agent_id", "")
                 if not agent_id:
                     self._send_json({"error": "Missing agent_id"}, 400)
@@ -306,6 +316,17 @@ class StdioAuthManager:
         self.agent_id = agent_id
         self.agent_name = agent_name
         logger.info(f"Stdio auth: selected agent '{agent_name}' ({agent_id})")
+
+    def cancel_authorization(self) -> dict:
+        """Owner tapped Cancel on the local confirmation page; no Agent is bound."""
+        self._error = "Authorization cancelled"
+        self._auth_complete.set()
+        message = "已取消授权。" if _stdio_is_cn() else "Authorization cancelled."
+        return {
+            "cancelled": True,
+            "success": False,
+            "message": message,
+        }
 
     def select_agent(self, agent_id: str, confirm_reset: Any = False) -> dict:
         """Bind an owned agent after explicit confirmation.

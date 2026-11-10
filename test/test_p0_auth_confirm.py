@@ -97,6 +97,9 @@ class FakeBackend:
         self.refresh_calls: list[str] = []
         self.created: list[str] = []
         self.max_agents = 10
+        self.claimed_count: int | None = None
+        self.include_quota = True
+        self.user_email: str | None = "acctest@example.com"
         self.fail_get_my_agents = False
 
     async def create_agent(self, name: str, display_name: Any = None, description: Any = None) -> dict[str, Any]:
@@ -132,9 +135,27 @@ class FakeBackend:
     def _find(self, agent_id: str) -> dict[str, Any] | None:
         return find_owned_agent(self.agents, agent_id)
 
+    def _quota_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"agents": self.public_agents()}
+        if not self.include_quota:
+            return payload
+        claimed = len(self.agents) if self.claimed_count is None else self.claimed_count
+        payload["claimed_count"] = claimed
+        payload["max_agents"] = self.max_agents
+        return payload
+
     async def exchange_external_code(self, code: str) -> dict[str, Any]:
         self.exchange_calls.append(code)
-        return {"jwt": "jwt-test-user", "user": {"id": "user-1"}}
+        user: dict[str, Any] = {"id": "user-1"}
+        if self.user_email:
+            user["email"] = self.user_email
+        return {"jwt": "jwt-test-user", "user": user}
+
+    async def get_me(self) -> dict[str, Any]:
+        me: dict[str, Any] = {"id": "user-1"}
+        if self.user_email:
+            me["email"] = self.user_email
+        return me
 
     def agents_payload(self) -> dict[str, Any]:
         agents = self.public_agents()
@@ -149,7 +170,7 @@ class FakeBackend:
             from clawdchat_mcp.api_client import ClawdChatAPIError
 
             raise ClawdChatAPIError(503, "unavailable")
-        return self.agents_payload()
+        return self._quota_payload()
 
     async def get_agent_credentials(self, agent_id: str) -> dict[str, Any]:
         self.credential_calls.append(agent_id)
@@ -172,7 +193,12 @@ class FakeBackend:
 
     def httpx_get(self, url: str, **kwargs: Any) -> FakeResponse:
         if url.endswith("/users/me/agents"):
-            return FakeResponse(200, self.agents_payload())
+            return FakeResponse(200, self._quota_payload())
+        if url.endswith("/users/me"):
+            return FakeResponse(200, {
+                "id": "user-1",
+                **({"email": self.user_email} if self.user_email else {}),
+            })
         if "/credentials" in url:
             agent_id = url.rstrip("/").split("/")[-2]
             self.credential_calls.append(agent_id)
@@ -210,6 +236,9 @@ class FakeUserClient:
 
     async def exchange_external_code(self, code: str) -> dict[str, Any]:
         return await self.backend.exchange_external_code(code)
+
+    async def get_me(self) -> dict[str, Any]:
+        return await self.backend.get_me()
 
     async def get_my_agents(self, auto_create: bool = True) -> dict[str, Any]:
         self.backend.auto_create_flags.append(auto_create)
@@ -384,6 +413,78 @@ class TestHostedLoginConfirm:
                     assert "confirmSelection()" in page.text
                     assert "auto-submit" in page.text or "never auto-submit" in page.text
                     assert not any("\u4e00" <= ch <= "\u9fff" for ch in page.text)
+
+        asyncio.run(_run())
+
+    def test_select_page_full_quota_hides_create_shows_display_name(self, clean_store) -> None:
+        async def _run() -> None:
+            backend = FakeBackend([
+                {
+                    "id": "agent-a",
+                    "name": "e2e78-zero",
+                    "display_name": "Zero-e2e",
+                    "api_key": "clawdchat_a",
+                    "post_count": 0,
+                    "follower_count": 0,
+                    "karma": 0,
+                    "is_active": True,
+                    "is_claimed": True,
+                },
+            ])
+            backend.max_agents = 1
+            app = _http_app()
+            transport = httpx.ASGITransport(app=app)
+            p_auth, p_server = _patch_user_client(backend)
+            with p_auth, p_server:
+                async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as client:
+                    _cid, _v, login_url = await _register_and_start_login(client)
+                    state = _query(login_url)["state"]
+                    await client.get("/auth/clawdchat/callback", params={"code": "c", "state": state})
+                    page = await client.get(
+                        f"/auth/select-agent?state={state}",
+                        headers={"Host": "mcp.clawdchat.ai"},
+                    )
+                    assert page.status_code == 200
+                    assert "Zero-e2e" in page.text
+                    assert "@e2e78-zero" in page.text
+                    assert "or create a new one" not in page.text
+                    assert 'id="createNewBtn"' not in page.text
+                    assert "cancelBtn" in page.text
+                    assert "Cancel" in page.text
+                    cn = await client.get(
+                        f"/auth/select-agent?state={state}",
+                        headers={"Host": "mcp.clawdchat.cn"},
+                    )
+                    assert "或新建一个" not in cn.text
+                    assert "取消" in cn.text
+
+        asyncio.run(_run())
+
+    def test_select_cancel_redirects_access_denied(self, clean_store) -> None:
+        async def _run() -> None:
+            backend = FakeBackend([
+                {"id": "agent-a", "name": "Alpha", "api_key": "clawdchat_a", "post_count": 0, "follower_count": 0, "karma": 0},
+            ])
+            app = _http_app()
+            transport = httpx.ASGITransport(app=app)
+            p_auth, p_server = _patch_user_client(backend)
+            with p_auth, p_server:
+                async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as client:
+                    _cid, _v, login_url = await _register_and_start_login(client)
+                    state = _query(login_url)["state"]
+                    await client.get("/auth/clawdchat/callback", params={"code": "c", "state": state})
+                    denied = await client.post(
+                        "/auth/select-agent",
+                        json={"state": state, "cancel": True},
+                    )
+                    assert denied.status_code == 200
+                    loc = denied.json()["redirect"]
+                    q = _query(loc)
+                    assert q["error"] == "access_denied"
+                    assert q["state"] == "p0-oauth-state"
+                    assert denied.json()["cancelled"] is True
+                    assert store.get_pending_login(state) is None
+                    assert store.auth_codes == {}
 
         asyncio.run(_run())
 
@@ -819,6 +920,15 @@ class TestStdioLoginConfirm:
             status = mgr.get_status()
             assert status["status"] == "needs_selection"
             assert len(status["agents"]) == len(agents)
+
+    def test_cancel_authorization_binds_nothing(self) -> None:
+        backend = FakeBackend([{"id": "agent-a", "name": "Alpha", "api_key": "clawdchat_a"}])
+        mgr = _stdio_manager(backend, backend.agents)
+        result = mgr.cancel_authorization()
+        assert result["cancelled"] is True
+        assert mgr.is_authenticated is False
+        assert mgr.api_key == ""
+        assert mgr.get_status()["error"] == "Authorization cancelled"
 
     def test_stored_key_bind_does_not_reset(self) -> None:
         backend = FakeBackend([

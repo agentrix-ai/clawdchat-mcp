@@ -807,12 +807,17 @@ async def select_agent_callback_handler(request: Request) -> JSONResponse:
             status_code=422,
         )
 
-    if not state or (not agent_id and not create_new):
+    cancel = body.get("cancel") is True
+
+    if not state or (not agent_id and not create_new and not cancel):
         return JSONResponse({"error": SelectAgentCopy.error(is_cn, "missing_agent")}, status_code=400)
 
     pending = store.get_pending_login(state)
     if not pending or not pending.user_jwt:
         return JSONResponse({"error": SelectAgentCopy.error(is_cn, "session_expired")}, status_code=400)
+
+    if cancel:
+        return _deny_pending_authorization(state, pending)
 
     if not agent_id:
         try:
@@ -930,6 +935,97 @@ def _issue_auth_code(
     return JSONResponse({"redirect": redirect_uri})
 
 
+def _deny_pending_authorization(state: str, pending: PendingLogin) -> JSONResponse:
+    """Owner tapped Cancel: same OAuth 2.1 access_denied path as refusing consent."""
+    store.consume_pending_login(state)
+    redirect_uri = construct_redirect_uri(
+        pending.redirect_uri,
+        error="access_denied",
+        error_description="The resource owner cancelled the authorization request",
+        state=pending.oauth_state or None,
+    )
+    logger.info("Owner cancelled authorization on the select-agent page")
+    return JSONResponse({"cancelled": True, "redirect": redirect_uri})
+
+
+def _quota_counts(agents_result: dict | None) -> tuple[int, int] | None:
+    """Return (claimed, max) only when the main site actually sent both integers."""
+    if not isinstance(agents_result, dict):
+        return None
+    used = agents_result.get("claimed_count")
+    limit = agents_result.get("max_agents")
+    if isinstance(used, int) and isinstance(limit, int) and limit > 0:
+        return used, limit
+    return None
+
+
+def mask_account(raw: str | None) -> str:
+    """Mask an email like acctest@example.com → ac***@example.com. Empty if not an email."""
+    value = (raw or "").strip()
+    if "@" not in value:
+        return ""
+    local, _, domain = value.partition("@")
+    if not domain:
+        return ""
+    keep = local[:2] if local else "*"
+    return f"{keep}***@{domain}"
+
+
+def _email_from(*objs: object) -> str:
+    for obj in objs:
+        if not isinstance(obj, dict):
+            continue
+        for key in ("email", "account_email"):
+            val = obj.get(key)
+            if isinstance(val, str) and "@" in val.strip():
+                return val.strip()
+        nested = obj.get("user")
+        if isinstance(nested, dict):
+            val = nested.get("email")
+            if isinstance(val, str) and "@" in val.strip():
+                return val.strip()
+    return ""
+
+
+def _quota_label(counts: tuple[int, int] | None, is_cn: bool) -> str:
+    if not counts:
+        return ""
+    used, limit = counts
+    return f"名额：{used}/{limit}" if is_cn else f"Quota: {used}/{limit}"
+
+
+def _account_label(masked: str, is_cn: bool) -> str:
+    if not masked:
+        return ""
+    return f"账号：{masked}" if is_cn else f"Account: {masked}"
+
+
+async def _confirm_owner_view(
+    jwt: str, is_cn: bool, extra_user: object = None
+) -> tuple[str, str, bool]:
+    """Logged-in account (masked) + quota for confirm-create. Missing data → omit, never guess."""
+    account = _account_label(mask_account(_email_from(extra_user)), is_cn)
+    quota = ""
+    can_approve = True
+    if not jwt:
+        return account, quota, can_approve
+    client = ClawdChatUserClient(settings.clawdchat_api_url, jwt)
+    try:
+        me = await client.get_me()
+        account = _account_label(mask_account(_email_from(me, extra_user)), is_cn) or account
+    except Exception:
+        logger.debug("confirm-create: GET /users/me unavailable; skip account label")
+    try:
+        agents = await client.get_my_agents(auto_create=False)
+        counts = _quota_counts(agents)
+        quota = _quota_label(counts, is_cn)
+        if counts:
+            can_approve = counts[0] < counts[1]
+    except Exception:
+        logger.debug("confirm-create: GET /users/me/agents unavailable; skip quota")
+    return account, quota, can_approve
+
+
 # ---------------------------------------------------------------- confirm creating an Agent
 # 对话里 AI 想再新建 Agent、但主人没在授权页上选「新建」时：AI 只能拿到一个确认链接。
 # 主人打开链接 → 用虾聊账号登录（必须和这条 MCP 连接是同一个账号）→ 点「同意新建」，
@@ -946,7 +1042,13 @@ _CONFIRM_TEXT = {
         "deny": "不用了",
         "done": "已同意。回到对话里，AI 会继续新建。",
         "denied": "已拒绝，不会新建。",
-        "expired": "确认链接无效或已过期，请让 AI 重新发一个。",
+        "approved_title": "已同意",
+        "denied_title": "已拒绝",
+        "full_title": "未能创建：名额已满",
+        "expired": "确认链接已过期，请让 AI 重新发一个。",
+        "used": "这个确认链接已经用过了，请让 AI 重新发一个。",
+        "no_nonce": "确认请求缺少校验参数，请从确认页重新点同意或拒绝。",
+        "full": "名额已满，无法再新建。",
         "mismatch": "登录的账号和这个 AI 连接的虾聊账号不是同一个，无法确认。",
         "failed": "登录失败，请重试。",
     },
@@ -960,7 +1062,13 @@ _CONFIRM_TEXT = {
         "deny": "No thanks",
         "done": "Approved. Go back to the conversation; the AI will continue.",
         "denied": "Declined. Nothing will be created.",
-        "expired": "This link is invalid or expired. Ask the AI for a new one.",
+        "approved_title": "Approved",
+        "denied_title": "Declined",
+        "full_title": "Could not create: Agent limit is full",
+        "expired": "This confirmation link has expired. Ask the AI for a new one.",
+        "used": "This confirmation link has already been used. Ask the AI for a new one.",
+        "no_nonce": "This confirmation request is missing a verification parameter. Open the confirmation page and tap Allow or No thanks again.",
+        "full": "Your Agent limit is full, so a new one cannot be created.",
         "mismatch": "That account is not the ClawdChat account this AI is connected with.",
         "failed": "Sign-in failed, please retry.",
     },
@@ -978,7 +1086,8 @@ def _confirm_page(is_cn: bool, inner: str) -> HTMLResponse:
         "background:#f0f2f5;display:flex;justify-content:center;padding-top:72px}"
         ".c{background:#fff;max-width:440px;width:92vw;padding:32px;border-radius:12px;"
         "border:1px solid #e5e7eb}h1{font-size:20px;color:#111827}p{color:#4b5563;font-size:14px;"
-        "line-height:1.6}.b{display:block;width:100%;padding:12px;border:none;border-radius:8px;"
+        "line-height:1.6}.meta{color:#6b7280;font-size:13px;margin:8px 0 0}"
+        ".b{display:block;width:100%;padding:12px;border:none;border-radius:8px;"
         "font-size:14px;font-weight:600;margin-top:12px;cursor:pointer;text-align:center;"
         "text-decoration:none}.p{background:#6366f1;color:#fff}.g{background:#fff;color:#6b7280;"
         "border:1px solid #e5e7eb}</style></head><body><div class=\"c\">"
@@ -994,6 +1103,33 @@ def _confirm_message(is_cn: bool, key: str, status: int = 200) -> HTMLResponse:
     return resp
 
 
+def _confirm_json_error(is_cn: bool, key: str, status: int) -> JSONResponse:
+    t = _CONFIRM_TEXT[is_cn]
+    return JSONResponse({"message": t[key], "error": key}, status_code=status)
+
+
+def _confirm_meta_html(account: str, quota: str) -> str:
+    bits: list[str] = []
+    if account:
+        bits.append(f'<p class="meta" id="acct">{html.escape(account)}</p>')
+    if quota:
+        bits.append(f'<p class="meta" id="quota">{html.escape(quota)}</p>')
+    return "".join(bits)
+
+
+def _confirm_ticket_failure(is_cn: bool, data: dict | None, *, as_json: bool) -> Response | None:
+    """Map missing / expired / already-used tickets to distinct copy + status."""
+    if not data:
+        if as_json:
+            return _confirm_json_error(is_cn, "expired", 400)
+        return _confirm_message(is_cn, "expired", 400)
+    if data.get("used"):
+        if as_json:
+            return _confirm_json_error(is_cn, "used", 410)
+        return _confirm_message(is_cn, "used", 410)
+    return None
+
+
 def new_create_ticket(access_token: str, name: str = "") -> str:
     ticket = secrets.token_urlsafe(24)
     store.store_create_ticket(ticket, {"access_token": access_token, "name": name or ""})
@@ -1005,8 +1141,9 @@ async def confirm_create_page_handler(request: Request) -> Response:
     is_cn = is_cn_site(request)
     ticket = request.query_params.get("t", "")
     data = store.get_create_ticket(ticket)
-    if not data:
-        return _confirm_message(is_cn, "expired", 400)
+    failed = _confirm_ticket_failure(is_cn, data, as_json=False)
+    if failed:
+        return failed
     t = _CONFIRM_TEXT[is_cn]
     params = urlencode(
         {"callback_url": f"{settings.mcp_server_url}/auth/confirm-create/callback", "state": ticket}
@@ -1027,7 +1164,11 @@ async def confirm_create_callback_handler(request: Request) -> Response:
     ticket = request.query_params.get("state", "")
     code = request.query_params.get("code", "")
     data = store.get_create_ticket(ticket)
-    if not data or not code:
+    failed = _confirm_ticket_failure(is_cn, data, as_json=False)
+    if failed:
+        return failed
+    assert data is not None
+    if not code:
         return _confirm_message(is_cn, "expired", 400)
     session = store.get_access_token(data["access_token"])
     if not session or not session.user_jwt:
@@ -1042,10 +1183,21 @@ async def confirm_create_callback_handler(request: Request) -> Response:
 
     data["verified"] = True
     data["nonce"] = secrets.token_urlsafe(24)
+    signed_jwt = str(result.get("jwt") or "")
+    account, quota, can_approve = await _confirm_owner_view(
+        signed_jwt, is_cn, result.get("user")
+    )
     t = _CONFIRM_TEXT[is_cn]
     name_html = (
         f"<p>{html.escape(t['name'])}<strong>{html.escape(data['name'])}</strong></p>"
         if data.get("name")
+        else ""
+    )
+    meta = _confirm_meta_html(account, quota)
+    full_note = f"<p>{html.escape(t['full'])}</p>" if not can_approve else ""
+    approve_btn = (
+        f'<button class="b p" id="y">{html.escape(t["approve"])}</button>'
+        if can_approve
         else ""
     )
     payload = html.escape(json.dumps({"ticket": ticket, "nonce": data["nonce"]}))
@@ -1055,15 +1207,17 @@ async def confirm_create_callback_handler(request: Request) -> Response:
         "var r=await fetch('/auth/confirm-create',{method:'POST',"
         "headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});"
         "var d=await r.json().catch(function(){return {}});"
+        "var h=document.querySelector('h1'); if(d.title) h.textContent=d.title;"
         "document.getElementById('m').textContent=d.message||'';"
         "document.getElementById('a').style.display='none';}"
-        "document.getElementById('y').onclick=function(){go(true)};"
+        "var y=document.getElementById('y');"
+        "if(y) y.onclick=function(){go(true)};"
         "document.getElementById('n').onclick=function(){go(false)};})();</script>"
     )
     return _confirm_page(
         is_cn,
-        f"<h1>{html.escape(t['ask'])}</h1>{name_html}"
-        f'<div id="a"><button class="b p" id="y">{html.escape(t["approve"])}</button>'
+        f"<h1>{html.escape(t['ask'])}</h1>{name_html}{meta}{full_note}"
+        f'<div id="a">{approve_btn}'
         f'<button class="b g" id="n">{html.escape(t["deny"])}</button></div>'
         f'<p id="m"></p><div id="p" data-body="{payload}"></div>{script}',
     )
@@ -1078,21 +1232,46 @@ async def confirm_create_submit_handler(request: Request) -> JSONResponse:
     except Exception:
         body = None
     if not isinstance(body, dict):
-        return JSONResponse({"message": t["expired"]}, status_code=400)
+        return _confirm_json_error(is_cn, "no_nonce", 400)
     ticket = str(body.get("ticket") or "")
     nonce = str(body.get("nonce") or "")
     data = store.get_create_ticket(ticket)
+    failed = _confirm_ticket_failure(is_cn, data, as_json=True)
+    if failed:
+        return failed
+    assert data is not None
     if (
-        not data
-        or not data.get("verified")
+        not data.get("verified")
         or not nonce
         or not secrets.compare_digest(str(data.get("nonce") or ""), nonce)
     ):
-        return JSONResponse({"message": t["expired"]}, status_code=403)
-    store.consume_create_ticket(ticket)
-    if body.get("approve") is not True:
-        return JSONResponse({"success": False, "message": t["denied"]})
-    if not store.change_create_grants(data["access_token"], +1):
-        return JSONResponse({"message": t["expired"]}, status_code=400)
-    logger.info("Owner approved creating an agent for an MCP session")
-    return JSONResponse({"success": True, "message": t["done"]})
+        return _confirm_json_error(is_cn, "no_nonce", 403)
+    if body.get("approve") is True:
+        session = store.get_access_token(data["access_token"])
+        jwt = session.user_jwt if session else ""
+        _account, _quota, can_approve = await _confirm_owner_view(jwt, is_cn)
+        if not can_approve:
+            return JSONResponse(
+                {"success": False, "title": t["full_title"], "message": t["full"], "error": "full"},
+                status_code=409,
+            )
+        consumed = store.consume_create_ticket(ticket)
+        if not consumed:
+            return _confirm_json_error(is_cn, "used", 410)
+        if not store.change_create_grants(data["access_token"], +1):
+            return _confirm_json_error(is_cn, "expired", 400)
+        logger.info("Owner approved creating an agent for an MCP session")
+        return JSONResponse({
+            "success": True,
+            "title": t["approved_title"],
+            "message": t["done"],
+            **{k: v for k, v in (("account", _account), ("quota", _quota)) if v},
+        })
+    consumed = store.consume_create_ticket(ticket)
+    if not consumed:
+        return _confirm_json_error(is_cn, "used", 410)
+    return JSONResponse({
+        "success": False,
+        "title": t["denied_title"],
+        "message": t["denied"],
+    })

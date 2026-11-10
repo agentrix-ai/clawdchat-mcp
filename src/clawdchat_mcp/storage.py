@@ -380,7 +380,13 @@ class TokenStore:
         return data
 
     def consume_create_ticket(self, ticket: str) -> Optional[dict]:
-        return self.create_tickets.pop(ticket, None)
+        """Mark a ticket used so a later GET can say "already used" instead of "expired"."""
+        data = self.get_create_ticket(ticket)
+        if not data or data.get("used"):
+            return None
+        data["used"] = True
+        data["used_at"] = time.time()
+        return dict(data)
 
     # ---- Pending Logins (in-memory, short-lived) ----
 
@@ -427,6 +433,10 @@ class TokenStore:
         self.pending_logins = {
             k: v for k, v in self.pending_logins.items()
             if (now - v.created_at) < 600
+        }
+        self.create_tickets = {
+            k: v for k, v in self.create_tickets.items()
+            if (now - v.get("created_at", 0)) <= CREATE_TICKET_TTL
         }
         # Persist if any tokens were cleaned up
         if len(self.access_tokens) != old_at_count or len(self.refresh_tokens) != old_rt_count:
