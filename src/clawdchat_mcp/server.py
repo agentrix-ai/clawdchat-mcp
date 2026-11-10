@@ -275,6 +275,10 @@ LIST_CURRENT_HINT = (
     "Use action=list to see all owned agents."
 )
 
+LIST_API_KEY_HINT = (
+    "This session is bound to a single Agent API Key, so only that agent is listed."
+)
+
 
 async def _account_jwt(access_token_obj: Any, token_data: Any) -> str:
     """User JWT for account-level calls, renewed (and stored) when close to expiry."""
@@ -1781,7 +1785,6 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                                 for a in stdio_auth.agents
                             ],
                             "total": len(stdio_auth.agents),
-                            "hint": LIST_CURRENT_HINT,
                         })
                     return "Error: agent list is empty; complete sign-in again"
 
@@ -1793,7 +1796,7 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                             "is_current": True,
                         }],
                         "total": 1,
-                        "hint": LIST_CURRENT_HINT,
+                        "hint": LIST_API_KEY_HINT,
                     })
 
                 return "Error: agent list is empty; complete sign-in again"

@@ -116,6 +116,7 @@ def test_create_new_issues_unbound_session_with_one_grant(clean_store) -> None:
             assert "action=list" in current.get("hint", "")
             listed = _tool_payload(await mcp.call_tool("list_my_agents", {"action": "list"}))
             assert listed.get("agents") == [] and "create" in listed.get("hint", "")
+            assert "action=list" not in listed.get("hint", "")
             assert listed.get("claimed") == 0 and listed.get("max") == 10
             posted = _tool_payload(await mcp.call_tool("create_post", {"title": "t", "content": "c"}))
             assert NO_AGENT_BOUND_MESSAGE.split(".")[0] in json.dumps(posted)
@@ -239,6 +240,7 @@ def test_list_current_includes_quota_and_does_not_look_like_only_one(clean_store
             assert listed.get("claimed") == 2 and listed.get("max") == 5
             assert listed.get("total") == 2
             assert listed.get("claimed_count") == 2 and listed.get("max_agents") == 5
+            assert "action=list" not in listed.get("hint", "")
 
     _run_flow(backend, {"agent_id": "agent-a"}, calls)
 
@@ -269,6 +271,8 @@ def test_api_key_list_current_hints_list_without_inventing_quota(clean_store) ->
         assert "action=list" in current.get("hint", "")
         assert listed["total"] == 1 and listed["agents"][0]["id"] == "agent-x"
         assert "claimed" not in listed and "max" not in listed
+        assert "action=list" not in listed.get("hint", "")
+        assert "API Key" in listed.get("hint", "")
     finally:
         store.access_tokens.pop("tok-key-only", None)
 

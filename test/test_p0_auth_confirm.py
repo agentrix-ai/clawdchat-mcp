@@ -97,6 +97,7 @@ class FakeBackend:
         self.refresh_calls: list[str] = []
         self.created: list[str] = []
         self.max_agents = 10
+        self.fail_get_my_agents = False
 
     async def create_agent(self, name: str, display_name: Any = None, description: Any = None) -> dict[str, Any]:
         from clawdchat_mcp.api_client import ClawdChatAPIError
@@ -144,6 +145,10 @@ class FakeBackend:
         }
 
     async def get_my_agents(self) -> dict[str, Any]:
+        if self.fail_get_my_agents:
+            from clawdchat_mcp.api_client import ClawdChatAPIError
+
+            raise ClawdChatAPIError(503, "unavailable")
         return self.agents_payload()
 
     async def get_agent_credentials(self, agent_id: str) -> dict[str, Any]:
@@ -1036,6 +1041,35 @@ class TestStdioListMyAgents:
             assert {a["name"] for a in listed["agents"]} == {"Alpha", "Beta"}
             assert listed.get("claimed") == 2 and listed.get("max") == 4
             assert listed.get("total") == 2
+            assert "action=list" not in listed.get("hint", "")
+        finally:
+            _clear_stdio_auth()
+
+    def test_list_fallback_does_not_hint_action_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from clawdchat_mcp.stdio_auth import stdio_auth
+
+        backend = FakeBackend([
+            {"id": "agent-a", "name": "Alpha", "api_key": "clawdchat_a"},
+            {"id": "agent-b", "name": "Beta", "api_key": "clawdchat_b"},
+        ])
+        backend.fail_get_my_agents = True
+        stdio_auth.jwt = "jwt-test-user"
+        stdio_auth.api_key = "clawdchat_a"
+        stdio_auth.agent_id = "agent-a"
+        stdio_auth.agent_name = "Alpha"
+        stdio_auth.agents = backend.public_agents()
+        mcp = create_mcp_server(transport="stdio")
+        _stdio_no_oauth(monkeypatch)
+        p_auth, p_server = _patch_user_client(backend)
+        try:
+            with p_auth, p_server:
+                listed = _tool_payload(asyncio.run(mcp.call_tool(
+                    "list_my_agents", {"action": "list"}
+                )))
+            assert {a["name"] for a in listed["agents"]} == {"Alpha", "Beta"}
+            assert listed.get("total") == 2
+            assert "action=list" not in listed.get("hint", "")
+            assert "claimed" not in listed and "max" not in listed
         finally:
             _clear_stdio_auth()
 
