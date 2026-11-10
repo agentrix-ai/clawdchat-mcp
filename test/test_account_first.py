@@ -112,8 +112,12 @@ def test_create_new_issues_unbound_session_with_one_grant(clean_store) -> None:
             assert "switch_agent" in str(exc.value)
             current = _tool_payload(await mcp.call_tool("list_my_agents", {"action": "current"}))
             assert current.get("bound") is False
+            assert current.get("claimed") == 0 and current.get("max") == 10
+            assert "action=list" in current.get("hint", "")
             listed = _tool_payload(await mcp.call_tool("list_my_agents", {"action": "list"}))
             assert listed.get("agents") == [] and "create" in listed.get("hint", "")
+            assert "action=list" not in listed.get("hint", "")
+            assert listed.get("claimed") == 0 and listed.get("max") == 10
             posted = _tool_payload(await mcp.call_tool("create_post", {"title": "t", "content": "c"}))
             assert NO_AGENT_BOUND_MESSAGE.split(".")[0] in json.dumps(posted)
 
@@ -151,6 +155,7 @@ def test_create_binds_new_agent(clean_store) -> None:
             assert _get_agent_client().api_key == "clawdchat_new_claude-neo"
             listed = _tool_payload(await mcp.call_tool("list_my_agents", {"action": "list"}))
             assert [a["is_current"] for a in listed["agents"]] == [True]
+            assert listed.get("claimed") == 1 and listed.get("max") == 10
             assert store.get_access_token(access).create_grants == 0
             # 一次「新建」用完了：再建要主人确认
             again = _tool_payload(await mcp.call_tool(
@@ -168,17 +173,76 @@ def test_create_at_limit_keeps_binding_and_lists_existing(clean_store) -> None:
     backend.max_agents = 1
 
     async def calls(mcp, client_id, access, consent):
-        store.change_create_grants(access, +1)  # 主人已确认过新建
+        store.change_create_grants(access, +1)  # 主人已确认过新建，但名额已满仍应直接拒绝
         with _as(access, client_id):
             res = _tool_payload(await mcp.call_tool(
                 "switch_agent", {"action": "create", "name": "second"}
             ))
             assert res.get("reason") == "claim_limit_reached"
+            assert res.get("success") is False
+            assert "confirm_url" not in res
+            assert res.get("claimed") == 1 and res.get("max") == 1
+            assert "1/1" in res.get("message", "")
             assert [a["name"] for a in res["existing_agents"]] == ["Alpha"]
+            assert "switch_agent" in res.get("next_step", "")
             assert _get_agent_client().api_key == "clawdchat_a"
 
     _run_flow(backend, {"agent_id": "agent-a"}, calls)
     assert backend.created == []
+
+
+def test_create_at_limit_without_grant_does_not_issue_confirm_url(clean_store) -> None:
+    """C2 regression: claimed==max must not mint a confirm_url the owner would click in vain."""
+    backend = FakeBackend([{"id": "agent-a", "name": "Alpha", "api_key": "clawdchat_a"}])
+    backend.max_agents = 1
+
+    async def calls(mcp, client_id, access, consent):
+        assert store.get_access_token(access).create_grants == 0
+        with _as(access, client_id):
+            res = _tool_payload(await mcp.call_tool(
+                "switch_agent", {"action": "create", "name": "second"}
+            ))
+            assert res.get("success") is False
+            assert res.get("reason") == "claim_limit_reached"
+            assert "confirm_url" not in res
+            assert res.get("needs_owner_confirmation") is not True
+            assert res.get("claimed") == 1 and res.get("max") == 1
+            assert "1/1" in res.get("message", "")
+            assert "Bind an existing agent" in res.get("next_step", "")
+            current = _tool_payload(await mcp.call_tool("list_my_agents", {"action": "current"}))
+            assert current["current_agent_id"] == "agent-a"
+            assert current.get("claimed") == 1 and current.get("max") == 1
+            assert current.get("total") == 1
+            assert "action=list" in current.get("hint", "")
+
+    store.create_tickets.clear()
+    _run_flow(backend, {"agent_id": "agent-a"}, calls)
+    assert backend.created == []
+    assert store.create_tickets == {}
+
+
+def test_list_current_includes_quota_and_does_not_look_like_only_one(clean_store) -> None:
+    backend = FakeBackend([
+        {"id": "agent-a", "name": "Alpha", "api_key": "clawdchat_a"},
+        {"id": "agent-b", "name": "Beta", "api_key": "clawdchat_b"},
+    ])
+    backend.max_agents = 5
+
+    async def calls(mcp, client_id, access, consent):
+        with _as(access, client_id):
+            current = _tool_payload(await mcp.call_tool("list_my_agents", {"action": "current"}))
+            assert current["current_agent_id"] == "agent-a"
+            assert current.get("claimed") == 2 and current.get("max") == 5
+            assert current.get("total") == 2
+            assert "action=list" in current.get("hint", "")
+            listed = _tool_payload(await mcp.call_tool("list_my_agents", {"action": "list"}))
+            assert {a["name"] for a in listed["agents"]} == {"Alpha", "Beta"}
+            assert listed.get("claimed") == 2 and listed.get("max") == 5
+            assert listed.get("total") == 2
+            assert listed.get("claimed_count") == 2 and listed.get("max_agents") == 5
+            assert "action=list" not in listed.get("hint", "")
+
+    _run_flow(backend, {"agent_id": "agent-a"}, calls)
 
 
 def test_create_requires_name(clean_store) -> None:
@@ -190,6 +254,27 @@ def test_create_requires_name(clean_store) -> None:
             assert "name is required" in json.dumps(res)
 
     _run_flow(backend, {"create_new": True}, calls)
+
+
+def test_api_key_list_current_hints_list_without_inventing_quota(clean_store) -> None:
+    store.access_tokens["tok-key-only"] = AccessTokenData(
+        token="tok-key-only", client_id="c", scopes=["agent"], expires_at=None,
+        agent_api_key="clawdchat_x", agent_id="agent-x", agent_name="X", user_jwt="",
+    )
+    mcp = create_mcp_server(transport="streamable-http")
+    try:
+        with _as("tok-key-only", "c"):
+            current = _tool_payload(asyncio.run(mcp.call_tool("list_my_agents", {"action": "current"})))
+            listed = _tool_payload(asyncio.run(mcp.call_tool("list_my_agents", {"action": "list"})))
+        assert current["current_agent_id"] == "agent-x"
+        assert "claimed" not in current and "max" not in current
+        assert "action=list" in current.get("hint", "")
+        assert listed["total"] == 1 and listed["agents"][0]["id"] == "agent-x"
+        assert "claimed" not in listed and "max" not in listed
+        assert "action=list" not in listed.get("hint", "")
+        assert "API Key" in listed.get("hint", "")
+    finally:
+        store.access_tokens.pop("tok-key-only", None)
 
 
 def test_api_key_session_cannot_create(clean_store) -> None:
