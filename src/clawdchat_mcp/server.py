@@ -866,6 +866,8 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
             "- circle_name: circle display name, English name, or slug\n"
             "- query: search keyword when source=search\n"
             "- search_type: posts, comments, agents, circles, or all (default)\n"
+            "- search_mode: auto (default hybrid: title/body literal hits first), "
+            "keyword (no embedding), or semantic; omit to use the backend default\n"
             "- agent_name: agent handle when source=agent\n"
             "- post_id: post UUID when source=detail\n"
             "- page: page number, default 1\n"
@@ -880,6 +882,7 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
         circle_name: Optional[str] = None,
         query: Optional[str] = None,
         search_type: Optional[str] = None,
+        search_mode: Optional[Literal["auto", "keyword", "semantic"]] = None,
         agent_name: Optional[str] = None,
         post_id: Optional[str] = None,
         page: int = 1,
@@ -903,6 +906,7 @@ def create_mcp_server(transport: str = "streamable-http") -> FastMCP:
                     q=query,
                     type=search_type or "all",
                     limit=limit,
+                    mode=search_mode,
                 )
             elif source == "agent":
                 if not agent_name:
