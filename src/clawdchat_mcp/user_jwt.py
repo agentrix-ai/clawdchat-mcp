@@ -33,6 +33,16 @@ def jwt_expires_at(token: str) -> Optional[float]:
         return None
 
 
+def jwt_subject(token: str) -> str:
+    """Read ``sub`` (the ClawdChat user id) from a JWT payload without verifying it."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return str(json.loads(base64.urlsafe_b64decode(payload.encode())).get("sub") or "")
+    except Exception:
+        return ""
+
+
 def needs_renewal(token: str, now: Optional[float] = None) -> bool:
     exp = jwt_expires_at(token)
     if exp is None:
