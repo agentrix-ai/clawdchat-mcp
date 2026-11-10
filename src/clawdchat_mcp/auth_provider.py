@@ -1044,6 +1044,7 @@ _CONFIRM_TEXT = {
         "denied": "已拒绝，不会新建。",
         "approved_title": "已同意",
         "denied_title": "已拒绝",
+        "full_title": "未能创建：名额已满",
         "expired": "确认链接已过期，请让 AI 重新发一个。",
         "used": "这个确认链接已经用过了，请让 AI 重新发一个。",
         "no_nonce": "确认请求缺少校验参数，请从确认页重新点同意或拒绝。",
@@ -1063,6 +1064,7 @@ _CONFIRM_TEXT = {
         "denied": "Declined. Nothing will be created.",
         "approved_title": "Approved",
         "denied_title": "Declined",
+        "full_title": "Could not create: Agent limit is full",
         "expired": "This confirmation link has expired. Ask the AI for a new one.",
         "used": "This confirmation link has already been used. Ask the AI for a new one.",
         "no_nonce": "This confirmation request is missing a verification parameter. Open the confirmation page and tap Allow or No thanks again.",
@@ -1250,7 +1252,7 @@ async def confirm_create_submit_handler(request: Request) -> JSONResponse:
         _account, _quota, can_approve = await _confirm_owner_view(jwt, is_cn)
         if not can_approve:
             return JSONResponse(
-                {"success": False, "title": t["denied_title"], "message": t["full"], "error": "full"},
+                {"success": False, "title": t["full_title"], "message": t["full"], "error": "full"},
                 status_code=409,
             )
         consumed = store.consume_create_ticket(ticket)

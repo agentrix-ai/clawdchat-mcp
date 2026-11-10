@@ -190,6 +190,34 @@ def test_ttl_expired_ticket_is_expired_not_used(clean_store) -> None:  # noqa: F
     assert store.get_create_ticket("old") is None
 
 
+def test_cleanup_expired_drops_used_tickets_only_after_ttl(clean_store) -> None:  # noqa: F811
+    from clawdchat_mcp.storage import CREATE_TICKET_TTL
+
+    store.store_create_ticket("fresh-used", {"access_token": "tok", "name": "x"})
+    assert store.consume_create_ticket("fresh-used") is not None
+    assert store.get_create_ticket("fresh-used")["used"] is True
+    store.cleanup_expired()
+    still = store.get_create_ticket("fresh-used")
+    assert still is not None and still.get("used") is True
+
+    store.create_tickets["old-used"] = {
+        "access_token": "tok",
+        "name": "x",
+        "used": True,
+        "created_at": time.time() - CREATE_TICKET_TTL - 1,
+    }
+    store.create_tickets["old-unused"] = {
+        "access_token": "tok",
+        "name": "y",
+        "created_at": time.time() - CREATE_TICKET_TTL - 1,
+    }
+    store.cleanup_expired()
+    assert "old-used" not in store.create_tickets
+    assert "old-unused" not in store.create_tickets
+    assert store.get_create_ticket("old-used") is None
+    assert store.get_create_ticket("fresh-used")["used"] is True
+
+
 def test_confirm_errors_cn_en_distinct(clean_store) -> None:  # noqa: F811
     backend = _backend(["user-1", "user-1"])
 
@@ -233,11 +261,11 @@ def test_confirm_errors_cn_en_distinct(clean_store) -> None:  # noqa: F811
 
 def test_confirm_hides_approve_when_quota_full(clean_store) -> None:  # noqa: F811
     backend = _backend(["user-1", "user-1"])
-    backend.max_agents = 1
 
     async def calls(mcp, client_id, access, consent):
         res = await _ask_create(mcp, client_id, access)
         ticket = _ticket(res["confirm_url"])
+        backend.max_agents = 1  # 票发出后名额才满（#22 合入后满额不再签发 confirm_url）
         transport = httpx.ASGITransport(app=mcp.streamable_http_app())
         async with httpx.AsyncClient(transport=transport, base_url="http://localhost:8347") as http:
             page = await _owner_signs_in(http, ticket)
@@ -253,6 +281,16 @@ def test_confirm_hides_approve_when_quota_full(clean_store) -> None:  # noqa: F8
             )
             assert blocked.status_code == 409
             assert blocked.json()["error"] == "full"
+            assert blocked.json()["title"] == "Could not create: Agent limit is full"
+            assert blocked.json()["title"] != "Declined"
+            cn = await http.post(
+                "/auth/confirm-create",
+                json={"ticket": ticket, "nonce": _nonce(page.text), "approve": True},
+                headers={"host": "mcp.clawdchat.cn"},
+            )
+            assert cn.status_code == 409
+            assert cn.json()["title"] == "未能创建：名额已满"
+            assert "已拒绝" not in cn.json()["title"]
             assert store.get_create_ticket(ticket) is not None
             assert store.get_create_ticket(ticket).get("used") is not True
         assert store.get_access_token(access).create_grants == 0

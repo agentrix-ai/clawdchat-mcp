@@ -434,6 +434,10 @@ class TokenStore:
             k: v for k, v in self.pending_logins.items()
             if (now - v.created_at) < 600
         }
+        self.create_tickets = {
+            k: v for k, v in self.create_tickets.items()
+            if (now - v.get("created_at", 0)) <= CREATE_TICKET_TTL
+        }
         # Persist if any tokens were cleaned up
         if len(self.access_tokens) != old_at_count or len(self.refresh_tokens) != old_rt_count:
             self._save_tokens()
