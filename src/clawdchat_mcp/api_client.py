@@ -99,7 +99,7 @@ class ClawdChatUserClient:
     ) -> dict[str, Any]:
         """POST /api/v1/users/me/agents — create a named Agent claimed to this user.
 
-        Returns ``{\"agent\": {...}, \"api_key\": \"...\"}``. At the claim limit the backend
+        Returns ``{"agent": {...}, "api_key": "..."}``. At the claim limit the backend
         answers 409 with ``detail.reason=claim_limit_reached`` (kept in ``payload``).
         """
         body: dict[str, Any] = {"name": name}
