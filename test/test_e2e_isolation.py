@@ -9,6 +9,7 @@ import pytest
 from clawdchat_mcp.e2e_isolation import (
     E2EIsolationError,
     assert_isolated_api_url,
+    install_client_guards,
     isolation_enabled,
 )
 
@@ -35,6 +36,7 @@ def test_isolation_on_refuses_production(monkeypatch):
 
 def test_agent_client_refuses_prod_when_isolated(monkeypatch):
     monkeypatch.setenv("CLAWDCHAT_E2E_ISOLATION", "true")
+    install_client_guards()
     from clawdchat_mcp.api_client import ClawdChatAgentClient
 
     with pytest.raises(E2EIsolationError):
