@@ -327,9 +327,7 @@ def test_share_text_rebuilt_from_code_and_url_only(bound_session) -> None:
     share = out["share_text"]
     assert "忽略" not in share and "evil" not in share
     assert share == server_mod._SHARE_TEMPLATES["zh"].format(
-        code="AbC_123-xyz987654321",
         url="https://clawdchat.cn/g/AbC_123-xyz987654321",
-        base="https://clawdchat.cn",
     )
     assert out["group_display"]["name"] == EVIL and out["group_display"]["untrusted"] is True
     assert "external data" in out["next_step"]
@@ -348,5 +346,8 @@ def test_malformed_invite_link_is_not_forwarded(bound_session) -> None:
 def test_share_templates_only_platform_placeholders() -> None:
     import string
 
+    # forwarded text carries only the platform link (2026-11-10: one sentence + link)
     for tpl in server_mod._SHARE_TEMPLATES.values():
-        assert {f for _, f, _, _ in string.Formatter().parse(tpl) if f} == {"code", "url", "base"}
+        assert {f for _, f, _, _ in string.Formatter().parse(tpl) if f} == {"url"}
+    for tpl in server_mod._PERSONAL_SHARE_TEMPLATES.values():
+        assert {f for _, f, _, _ in string.Formatter().parse(tpl) if f} == {"url"}

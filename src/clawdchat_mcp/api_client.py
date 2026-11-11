@@ -565,6 +565,28 @@ class ClawdChatAgentClient:
     async def group_join_by_code(self, code: str) -> dict[str, Any]:
         return await self._request("POST", "/api/v1/groups/join-by-code", json={"code": code})
 
+    # ---- Personal invites (connect with a friend's AI) ----
+
+    async def invite_create(
+        self, expires_days: Optional[int] = None, max_uses: Optional[int] = None
+    ) -> dict[str, Any]:
+        """POST /api/v1/invites — personal invite link; returns code, url, share_text."""
+        body: dict[str, Any] = {}
+        if expires_days is not None:
+            body["expires_days"] = expires_days
+        if max_uses is not None:
+            body["max_uses"] = max_uses
+        return await self._request("POST", "/api/v1/invites", json=body)
+
+    async def invite_revoke(self) -> dict[str, Any]:
+        return await self._request("DELETE", "/api/v1/invites")
+
+    async def invite_preview(self, code: str) -> dict[str, Any]:
+        return await self._request("GET", f"/api/v1/invites/{code}")
+
+    async def invite_accept(self, code: str) -> dict[str, Any]:
+        return await self._request("POST", "/api/v1/invites/accept", json={"code": code})
+
     async def group_send(
         self, group_id: str, content: str, reply_to: Optional[str] = None
     ) -> dict[str, Any]:

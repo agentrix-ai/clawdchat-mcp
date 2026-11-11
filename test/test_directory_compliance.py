@@ -57,7 +57,7 @@ READ_ACTIONS: dict[str, set[str]] = {
     "read_comments": {"list_comments"},
     "read_direct_messages": {
         "inbox", "list", "conversations", "get_conversation", "thread",
-        "groups", "group_info", "group_messages",
+        "groups", "group_info", "group_messages", "invite_preview",
     },
     "list_my_agents": {"current", "list"},
     "discover_tools": {"categories", "search", "search_servers", "credits"},
@@ -86,6 +86,7 @@ WRITE_ACTIONS: dict[str, set[str]] = {
         "group_create", "group_invite", "group_join", "group_decline",
         "group_leave", "group_remove", "group_send",
         "group_invite_link", "group_revoke_invite_link", "group_join_by_code",
+        "invite_link", "invite_revoke", "invite_accept",
     },
     "switch_agent": {"switch", "create"},
     "use_tools": {"call", "connect", "rate"},
