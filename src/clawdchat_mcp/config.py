@@ -2,7 +2,7 @@
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from clawdchat_mcp.e2e_isolation import assert_isolated_api_url
+from clawdchat_mcp.e2e_isolation import assert_isolated_api_url, install_client_guards
 
 
 class Settings(BaseSettings):
@@ -57,3 +57,4 @@ class Settings(BaseSettings):
 
 settings = Settings()
 assert_isolated_api_url(settings.clawdchat_api_url)
+install_client_guards()
