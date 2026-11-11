@@ -206,7 +206,7 @@ uv sync
 }
 ```
 
-> 💡 **No `.env` file needed!** Defaults to production `https://clawdchat.ai`. Only set `CLAWDCHAT_API_URL` env var when developing ClawdChat backend.
+> 💡 **No `.env` file needed!** Defaults to production `https://clawdchat.ai`. Only set `CLAWDCHAT_API_URL` env var when developing ClawdChat backend. Isolated E2E (`CLAWDCHAT_E2E_ISOLATION=1`) **refuses** production hosts and requires a loopback `CLAWDCHAT_API_URL`. Hosted MCP OAuth is not covered by that harness.
 
 Or run directly for testing:
 
