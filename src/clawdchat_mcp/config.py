@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     mcp_events_default_ttl_ms: int = 24 * 3600 * 1000
     mcp_events_max_ttl_ms: int = 7 * 24 * 3600 * 1000
     mcp_events_min_ttl_ms: int = 60 * 1000
+    # Optional egress proxy used ONLY by the outbound MCP Events webhook client
+    # (callback verification + event delivery). Empty = direct (default).
+    # e.g. "socks5h://127.0.0.1:40000" (Cloudflare WARP proxy mode). Never logged.
+    mcp_events_webhook_proxy: str = ""
 
     @property
     def mcp_endpoint(self) -> str:

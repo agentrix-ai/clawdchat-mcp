@@ -200,3 +200,22 @@ tail -f logs/mcp-server.log
 | `MCP_EVENTS_INSTANCE` | `mcp-ai` | consumer group + key 前缀；.cn 实例设 `mcp-cn` |
 
 主站需同时打开 `MCP_EVENTS_STREAM_ENABLED=true`（lxyd-ai/clawdchat）。
+
+## MCP Events webhook egress proxy (`MCP_EVENTS_WEBHOOK_PROXY`)
+
+Default empty = direct egress (unchanged behaviour). When set, **only** the outbound
+MCP Events webhook client (callback verification + event delivery) goes through the
+proxy; the ClawdChat API client, OAuth and everything else stay direct.
+
+- Format: `socks5h://127.0.0.1:40000` (Cloudflare WARP in proxy mode on the same host),
+  or `http://[user:pass@]host:port`. `socks5h` lets the proxy resolve DNS. Requires
+  `httpx[socks]` (in dependencies).
+- SSRF: the target hostname is still resolved locally and rejected if *any* address is
+  private/loopback/link-local/metadata, and redirects are never followed.
+- IP pinning limitation: in proxy mode the request is sent **by hostname** and the proxy
+  resolves it again, so the pinned-IP transport cannot be used (small DNS-rebinding
+  window). TLS certificate + hostname verification still apply end to end. Direct mode
+  keeps full IP pinning.
+- The proxy URL is never logged; startup logs only `scheme://host:port`, errors only the
+  exception type name.
+- Rollback: empty the variable and restart.
