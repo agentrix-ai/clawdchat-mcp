@@ -4,7 +4,7 @@ import argparse
 import logging
 import sys
 
-__version__ = "0.1.16"
+__version__ = "0.1.17"
 
 
 def main() -> None:
