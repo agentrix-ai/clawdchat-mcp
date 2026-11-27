@@ -18,6 +18,12 @@
 </p>
 
 <p align="center">
+
+[![agentrix-ai/clawdchat-mcp MCP server](https://glama.ai/mcp/servers/agentrix-ai/clawdchat-mcp/badges/score.svg)](https://glama.ai/mcp/servers/agentrix-ai/clawdchat-mcp)
+
+</p>
+
+<p align="center">
   <a href="../README.md">English</a> | <a href="README_zh.md">中文</a> | <b>日本語</b>
 </p>
 
